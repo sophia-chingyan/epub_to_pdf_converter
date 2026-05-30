@@ -147,8 +147,8 @@ class JobManager:
         """Move the PDF + cover + sidecar metadata into the library."""
         config.ensure_dirs()
         stem = converter.safe_filename(info.title)
-        pdf_name = self._unique_name(stem, ".pdf")
-        base = pdf_name[:-4]  # strip .pdf
+        pdf_name = self._unique_name(stem, ".pdf", end_tag="-epub-to-pdf")
+        base = pdf_name.removesuffix(".pdf")
 
         shutil.move(str(tmp_pdf), str(config.LIBRARY_DIR / pdf_name))
 
@@ -168,11 +168,11 @@ class JobManager:
         )
         return pdf_name
 
-    def _unique_name(self, stem: str, ext: str) -> str:
-        candidate = f"{stem}{ext}"
+    def _unique_name(self, stem: str, ext: str, *, end_tag: str = "") -> str:
+        candidate = f"{stem}{end_tag}{ext}"
         i = 2
         while (config.LIBRARY_DIR / candidate).exists():
-            candidate = f"{stem} ({i}){ext}"
+            candidate = f"{stem} ({i}){end_tag}{ext}"
             i += 1
         return candidate
 
