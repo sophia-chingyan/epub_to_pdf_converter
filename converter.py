@@ -38,6 +38,13 @@ _FONT_OBFUSCATION_ALGOS = {
     "http://ns.adobe.com/pdf/enc#RC",
 }
 
+# Keywords in EpubError messages that indicate non-transient (structural)
+# errors which should NOT be retried.
+_NON_RETRYABLE_KEYWORDS = ("drm", "not a valid", "malformed", "not found")
+
+# Base delay (seconds) for exponential backoff between retry attempts.
+_RETRY_BACKOFF_BASE_SEC = 5
+
 _IMAGE_EXT_BY_MIME = {
     "image/jpeg": ".jpg",
     "image/jpg": ".jpg",
@@ -397,11 +404,10 @@ def _render_with_retry(
             last_err = e
             # Non-transient errors should not be retried.
             msg = str(e).lower()
-            if any(kw in msg for kw in ("drm", "not a valid", "malformed",
-                                        "not found")):
+            if any(kw in msg for kw in _NON_RETRYABLE_KEYWORDS):
                 raise
             if attempt < max_retries:
-                time.sleep(5 * (2 ** (attempt - 1)))  # 5s, 10s, 20s …
+                time.sleep(_RETRY_BACKOFF_BASE_SEC * (2 ** (attempt - 1)))
     raise last_err  # type: ignore[misc]
 
 
