@@ -115,12 +115,26 @@ class JobManager:
 
             self._begin(job, 4, "Rendering PDF (this is the slow step)")
             tmp_pdf = workdir / "output.pdf"
-            converter.render_pdf(
+            render_timeout = converter.effective_timeout(
+                config.JOB_TIMEOUT_SEC, upload_path, config.TIMEOUT_PER_MB,
+            )
+
+            def _on_retry(attempt: int, max_retries: int, timeout: int) -> None:
+                self._begin(
+                    job, 4,
+                    f"Rendering PDF (retry {attempt}/{max_retries}, "
+                    f"timeout {timeout}s)",
+                )
+
+            converter.render_pdf_with_retries(
                 upload_path, tmp_pdf, info,
                 size=config.REFLOWABLE_PAGE_SIZE,
-                timeout=config.JOB_TIMEOUT_SEC,
+                timeout=render_timeout,
                 chromium_path=config.CHROMIUM_PATH,
                 cwd=workdir,
+                max_retries=config.RENDER_MAX_RETRIES,
+                backoff=config.RENDER_TIMEOUT_BACKOFF,
+                on_retry=_on_retry,
             )
             self._complete(job, 4, "PDF rendered")
 

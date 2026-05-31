@@ -90,6 +90,9 @@ Copy `.env.example` to `.env` and fill it in. Key values:
 | `DATA_DIR` | ✅ (prod) | Point at a persistent volume |
 | `REFLOWABLE_PAGE_SIZE` | optional | Default `A5` |
 | `JOB_TIMEOUT_SEC` | optional | Default `300` |
+| `RENDER_MAX_RETRIES` | optional | Retry attempts for rendering; default `2` |
+| `RENDER_TIMEOUT_BACKOFF` | optional | Timeout multiplier per retry; default `1.5` |
+| `TIMEOUT_PER_MB` | optional | Extra seconds per MB of ePUB; default `10` |
 | `MAX_UPLOAD_MB` | optional | Default `100` |
 
 ---
@@ -145,6 +148,13 @@ Headless Chromium uses shared memory (`/dev/shm`), which defaults to a small
 size in containers and can cause crashes on big/fixed-layout books. If you hit
 this, increase the container's shared memory (e.g. a larger `shm-size`, or a
 `/dev/shm` mount with more space) and/or raise `JOB_TIMEOUT_SEC`.
+
+**Large ePUBs fail after one attempt.**
+The converter automatically retries rendering up to `RENDER_MAX_RETRIES` times
+(default 2) with an increasing timeout (multiplied by `RENDER_TIMEOUT_BACKOFF`
+each attempt). It also adds `TIMEOUT_PER_MB` extra seconds per megabyte of the
+ePUB. For very large books, raise `JOB_TIMEOUT_SEC`, `RENDER_MAX_RETRIES`,
+or `MAX_UPLOAD_MB` as needed.
 
 **Chinese/Japanese/Korean glyphs missing or boxes (tofu).**
 The image bundles `fonts-noto-cjk` + `fonts-noto-cjk-extra`. If a book embeds

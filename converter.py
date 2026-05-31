@@ -295,6 +295,62 @@ def render_pdf(
         raise EpubError(f"Vivliostyle failed to render the PDF.\n{detail}")
 
 
+def effective_timeout(base_timeout: int, epub_path: Path, per_mb: int) -> int:
+    """Return *base_timeout* extended by *per_mb* seconds for each MB of the ePUB."""
+    try:
+        size_mb = epub_path.stat().st_size / (1024 * 1024)
+    except OSError:
+        size_mb = 0
+    return base_timeout + int(size_mb * per_mb)
+
+
+def render_pdf_with_retries(
+    epub_path: Path,
+    out_pdf: Path,
+    info: EpubInfo,
+    *,
+    size: str,
+    timeout: int,
+    chromium_path: str | None,
+    cwd: Path | None = None,
+    max_retries: int = 0,
+    backoff: float = 1.5,
+    on_retry: None | object = None,
+) -> None:
+    """Wrap :func:`render_pdf` with automatic retries and exponential timeout growth.
+
+    *on_retry* is an optional callback ``(attempt, max_retries, timeout)``
+    invoked before each retry so that callers can update progress indicators.
+    """
+    last_err: EpubError | None = None
+    current_timeout = timeout
+
+    for attempt in range(1 + max_retries):
+        try:
+            render_pdf(
+                epub_path, out_pdf, info,
+                size=size,
+                timeout=current_timeout,
+                chromium_path=chromium_path,
+                cwd=cwd,
+            )
+            return  # success
+        except EpubError as e:
+            last_err = e
+            # Don't retry hard errors (missing CLI, DRM, …)
+            if "not found" in str(e).lower() or "DRM" in str(e):
+                raise
+            if attempt < max_retries:
+                current_timeout = int(current_timeout * backoff)
+                if on_retry is not None:
+                    on_retry(attempt + 1, max_retries, current_timeout)  # type: ignore[operator]
+                # Clean up the failed output so the next attempt starts fresh
+                if out_pdf.exists():
+                    out_pdf.unlink(missing_ok=True)
+            else:
+                raise last_err
+
+
 # --- Filename helpers -------------------------------------------------------
 _SAFE_RE = re.compile(r"[^\w.\- ]", re.UNICODE)
 

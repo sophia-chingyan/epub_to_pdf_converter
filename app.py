@@ -150,7 +150,7 @@ async def upload(request: Request, file: UploadFile = File(...)):
                 )
             out.write(chunk)
 
-    return JSONResponse({"filename": safe})
+    return JSONResponse({"filename": safe, "size_mb": round(size / (1024 * 1024), 1)})
 
 
 @app.post("/start-convert/{filename}")

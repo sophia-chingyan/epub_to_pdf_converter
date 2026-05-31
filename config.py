@@ -49,6 +49,17 @@ REFLOWABLE_PAGE_SIZE = os.getenv("REFLOWABLE_PAGE_SIZE", "A5")
 # subprocess).
 JOB_TIMEOUT_SEC = int(os.getenv("JOB_TIMEOUT_SEC", "300"))
 
+# Number of retry attempts for the PDF rendering step.  Each retry uses a
+# longer timeout (multiplied by RENDER_TIMEOUT_BACKOFF).
+RENDER_MAX_RETRIES = int(os.getenv("RENDER_MAX_RETRIES", "2"))
+
+# Multiplier applied to the timeout on each successive retry attempt.
+RENDER_TIMEOUT_BACKOFF = float(os.getenv("RENDER_TIMEOUT_BACKOFF", "1.5"))
+
+# Extra timeout seconds added per megabyte of the ePUB file so that large
+# books automatically receive more rendering time.
+TIMEOUT_PER_MB = int(os.getenv("TIMEOUT_PER_MB", "10"))
+
 # Maximum accepted upload size in megabytes.
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "100"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024

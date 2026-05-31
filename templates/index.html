@@ -193,7 +193,10 @@
         <!-- Confirm -->
         <section id="confirm-section">
             <h3>Ready to Convert</h3>
-            <p>File: <span class="confirm-filename" id="confirm-filename"></span></p>
+            <p>File: <span class="confirm-filename" id="confirm-filename"></span> <span id="confirm-size" style="color:#78909c;font-size:0.9rem"></span></p>
+            <div id="large-file-warning" style="display:none;background:#fff3e0;border-left:4px solid #fb8c00;padding:0.75rem 1rem;border-radius:6px;margin-bottom:1rem;color:#e65100;font-size:0.9rem">
+                ⚠️ This is a large file. Conversion may take longer and will automatically retry if needed.
+            </div>
             <p>This will render the ePUB to a PDF, preserving images, links, layout and vertical text.</p>
             <div class="confirm-buttons">
                 <button id="confirm-cancel" class="secondary outline">Cancel</button>
@@ -294,6 +297,15 @@
                 pendingFilename = data.filename;
                 uploadSection.style.display = 'none';
                 confirmFilename.textContent = data.filename;
+                const sizeSpan = document.getElementById('confirm-size');
+                const warning = document.getElementById('large-file-warning');
+                if (data.size_mb != null) {
+                    sizeSpan.textContent = '(' + data.size_mb + ' MB)';
+                    warning.style.display = data.size_mb >= 50 ? 'block' : 'none';
+                } else {
+                    sizeSpan.textContent = '';
+                    warning.style.display = 'none';
+                }
                 confirmSection.style.display = 'block';
             } catch (err) {
                 alert('Upload failed: ' + err.message);
