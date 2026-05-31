@@ -13,6 +13,7 @@ import re
 import subprocess
 import xml.etree.ElementTree as ET
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -315,7 +316,7 @@ def render_pdf_with_retries(
     cwd: Path | None = None,
     max_retries: int = 0,
     backoff: float = 1.5,
-    on_retry: None | object = None,
+    on_retry: Callable[[int, int, int], None] | None = None,
 ) -> None:
     """Wrap :func:`render_pdf` with automatic retries and exponential timeout growth.
 
@@ -343,7 +344,7 @@ def render_pdf_with_retries(
             if attempt < max_retries:
                 current_timeout = int(current_timeout * backoff)
                 if on_retry is not None:
-                    on_retry(attempt + 1, max_retries, current_timeout)  # type: ignore[operator]
+                    on_retry(attempt + 1, max_retries, current_timeout)
                 # Clean up the failed output so the next attempt starts fresh
                 if out_pdf.exists():
                     out_pdf.unlink(missing_ok=True)

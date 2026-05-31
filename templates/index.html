@@ -148,6 +148,20 @@
             color: #78909c;
             margin-left: 0.5rem;
         }
+        .large-file-warning {
+            display: none;
+            background: #fff3e0;
+            border-left: 4px solid #fb8c00;
+            padding: 0.75rem 1rem;
+            border-radius: 6px;
+            margin-bottom: 1rem;
+            color: #e65100;
+            font-size: 0.9rem;
+        }
+        .confirm-size {
+            color: #78909c;
+            font-size: 0.9rem;
+        }
         #confirm-section, #progress-section { display: none; }
         #confirm-section, #progress-section {
             background: #fff;
@@ -193,8 +207,8 @@
         <!-- Confirm -->
         <section id="confirm-section">
             <h3>Ready to Convert</h3>
-            <p>File: <span class="confirm-filename" id="confirm-filename"></span> <span id="confirm-size" style="color:#78909c;font-size:0.9rem"></span></p>
-            <div id="large-file-warning" style="display:none;background:#fff3e0;border-left:4px solid #fb8c00;padding:0.75rem 1rem;border-radius:6px;margin-bottom:1rem;color:#e65100;font-size:0.9rem">
+            <p>File: <span class="confirm-filename" id="confirm-filename"></span> <span id="confirm-size" class="confirm-size"></span></p>
+            <div id="large-file-warning" class="large-file-warning">
                 ⚠️ This is a large file. Conversion may take longer and will automatically retry if needed.
             </div>
             <p>This will render the ePUB to a PDF, preserving images, links, layout and vertical text.</p>
