@@ -7,20 +7,28 @@ invoked as a subprocess.
 """
 from __future__ import annotations
 
+import copy
 import io
 import posixpath
 import re
 import subprocess
+import time
 import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 try:
     from PIL import Image
     _HAS_PIL = True
 except Exception:  # pragma: no cover - Pillow should be installed
     _HAS_PIL = False
+
+# Register common OPF namespaces so ET.tostring preserves prefixes.
+ET.register_namespace("", "http://www.idpf.org/2007/opf")
+ET.register_namespace("dc", "http://purl.org/dc/elements/1.1/")
+ET.register_namespace("dcterms", "http://purl.org/dc/terms/")
 
 
 # Algorithms used purely for font obfuscation (NOT content DRM). An ePUB whose
@@ -29,6 +37,13 @@ _FONT_OBFUSCATION_ALGOS = {
     "http://www.idpf.org/2008/embedding",
     "http://ns.adobe.com/pdf/enc#RC",
 }
+
+# Keywords in EpubError messages that indicate non-transient (structural)
+# errors which should NOT be retried.
+_NON_RETRYABLE_KEYWORDS = ("drm", "not a valid", "malformed", "not found")
+
+# Base delay (seconds) for exponential backoff between retry attempts.
+_RETRY_BACKOFF_BASE_SEC = 5
 
 _IMAGE_EXT_BY_MIME = {
     "image/jpeg": ".jpg",
@@ -293,6 +308,194 @@ def render_pdf(
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-8:]
         detail = "\n".join(tail) if tail else "no output"
         raise EpubError(f"Vivliostyle failed to render the PDF.\n{detail}")
+
+
+# --- Chunked rendering ------------------------------------------------------
+
+def extract_spine_idrefs(epub_path: Path) -> tuple[str, ET.Element, list[str]]:
+    """Return (opf_path, opf_root, ordered list of spine itemref idrefs)."""
+    with zipfile.ZipFile(epub_path) as zf:
+        opf_path = _find_opf_path(zf)
+        opf_root = ET.fromstring(zf.read(opf_path))
+
+    idrefs: list[str] = []
+    for spine in _iter(opf_root, "spine"):
+        for child in spine:
+            if _localname(child.tag) == "itemref":
+                idref = child.get("idref")
+                if idref:
+                    idrefs.append(idref)
+        break  # only the first <spine>
+    return opf_path, opf_root, idrefs
+
+
+def estimate_chunk_timeout(num_items: int) -> int:
+    """Calculate an adaptive timeout (seconds) for a chunk of spine items."""
+    from config import ADAPTIVE_TIMEOUT_BASE, ADAPTIVE_TIMEOUT_PER_SPINE_ITEM
+    return ADAPTIVE_TIMEOUT_BASE + num_items * ADAPTIVE_TIMEOUT_PER_SPINE_ITEM
+
+
+def _create_chunk_epub(
+    epub_path: Path,
+    opf_path: str,
+    opf_root: ET.Element,
+    chunk_idrefs: set[str],
+    out_epub: Path,
+) -> None:
+    """Create a sub-EPUB whose spine contains only *chunk_idrefs*.
+
+    All manifest items (CSS, images, fonts) are preserved so every chapter
+    can still reference its resources.
+    """
+    chunk_opf = copy.deepcopy(opf_root)
+    for spine in _iter(chunk_opf, "spine"):
+        for child in list(spine):
+            if _localname(child.tag) == "itemref":
+                if child.get("idref") not in chunk_idrefs:
+                    spine.remove(child)
+        break
+
+    modified_opf = ET.tostring(chunk_opf, encoding="utf-8",
+                               xml_declaration=True)
+
+    with zipfile.ZipFile(epub_path, "r") as src, \
+         zipfile.ZipFile(out_epub, "w") as dst:
+        # mimetype must be first entry, stored uncompressed (EPUB spec).
+        for item in src.infolist():
+            if item.filename == "mimetype":
+                dst.writestr(item, src.read(item.filename),
+                             compress_type=zipfile.ZIP_STORED)
+                break
+
+        for item in src.infolist():
+            if item.filename == "mimetype":
+                continue
+            if item.filename == opf_path:
+                dst.writestr(item.filename, modified_opf,
+                             compress_type=zipfile.ZIP_DEFLATED)
+            else:
+                dst.writestr(item, src.read(item.filename))
+
+
+def _render_with_retry(
+    epub_path: Path,
+    out_pdf: Path,
+    info: EpubInfo,
+    *,
+    size: str,
+    timeout: int,
+    chromium_path: str | None,
+    cwd: Path | None = None,
+    max_retries: int = 2,
+) -> None:
+    """Render a single PDF with exponential-backoff retry on transient errors."""
+    last_err: EpubError | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            # Scale timeout upward on retries.
+            attempt_timeout = timeout * attempt
+            render_pdf(
+                epub_path, out_pdf, info,
+                size=size, timeout=attempt_timeout,
+                chromium_path=chromium_path, cwd=cwd,
+            )
+            return  # success
+        except EpubError as e:
+            last_err = e
+            # Non-transient errors should not be retried.
+            msg = str(e).lower()
+            if any(kw in msg for kw in _NON_RETRYABLE_KEYWORDS):
+                raise
+            if attempt < max_retries:
+                time.sleep(_RETRY_BACKOFF_BASE_SEC * (2 ** (attempt - 1)))
+    raise last_err  # type: ignore[misc]
+
+
+def merge_pdfs(pdf_paths: list[Path], out_path: Path) -> None:
+    """Merge multiple PDFs into a single file using pypdf."""
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    try:
+        for p in pdf_paths:
+            writer.append(str(p))
+        writer.write(str(out_path))
+    finally:
+        writer.close()
+
+
+def render_pdf_chunked(
+    epub_path: Path,
+    out_pdf: Path,
+    info: EpubInfo,
+    *,
+    size: str,
+    base_timeout: int,
+    chromium_path: str | None,
+    cwd: Path | None = None,
+    chunk_size: int,
+    max_retries: int,
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> None:
+    """Render a (potentially large) EPUB in chunks, with retry per chunk.
+
+    For small books (spine items <= *chunk_size*) this falls through to a
+    single render pass, still benefiting from retry and adaptive timeout.
+    """
+    opf_path, opf_root, idrefs = extract_spine_idrefs(epub_path)
+
+    # --- small book → single render (no chunking overhead) ---
+    if not idrefs or len(idrefs) <= chunk_size:
+        timeout = max(base_timeout, estimate_chunk_timeout(len(idrefs)))
+        _render_with_retry(
+            epub_path, out_pdf, info,
+            size=size, timeout=timeout,
+            chromium_path=chromium_path, cwd=cwd,
+            max_retries=max_retries,
+        )
+        return
+
+    # --- large book → split, render chunks, merge ---
+    chunks = [idrefs[i:i + chunk_size]
+              for i in range(0, len(idrefs), chunk_size)]
+    work = cwd or out_pdf.parent
+    chunk_pdfs: list[Path] = []
+
+    try:
+        for idx, chunk_idrefs in enumerate(chunks):
+            if progress_cb:
+                progress_cb(idx + 1, len(chunks))
+
+            chunk_epub = work / f"chunk_{idx}.epub"
+            chunk_pdf = work / f"chunk_{idx}.pdf"
+
+            _create_chunk_epub(
+                epub_path, opf_path, opf_root,
+                set(chunk_idrefs), chunk_epub,
+            )
+
+            timeout = max(base_timeout,
+                          estimate_chunk_timeout(len(chunk_idrefs)))
+            try:
+                _render_with_retry(
+                    chunk_epub, chunk_pdf, info,
+                    size=size, timeout=timeout,
+                    chromium_path=chromium_path, cwd=cwd,
+                    max_retries=max_retries,
+                )
+                chunk_pdfs.append(chunk_pdf)
+            except EpubError as e:
+                raise EpubError(
+                    f"Chunk {idx + 1}/{len(chunks)} failed after "
+                    f"{max_retries} attempt(s): {e}"
+                ) from e
+            finally:
+                chunk_epub.unlink(missing_ok=True)
+
+        merge_pdfs(chunk_pdfs, out_pdf)
+    finally:
+        for p in chunk_pdfs:
+            p.unlink(missing_ok=True)
 
 
 # --- Filename helpers -------------------------------------------------------
