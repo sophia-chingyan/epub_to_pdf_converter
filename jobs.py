@@ -115,12 +115,20 @@ class JobManager:
 
             self._begin(job, 4, "Rendering PDF (this is the slow step)")
             tmp_pdf = workdir / "output.pdf"
-            converter.render_pdf(
+
+            def on_chunk_progress(current: int, total: int) -> None:
+                self._begin(job, 4,
+                            f"Rendering chunk {current}/{total}")
+
+            converter.render_pdf_chunked(
                 upload_path, tmp_pdf, info,
                 size=config.REFLOWABLE_PAGE_SIZE,
-                timeout=config.JOB_TIMEOUT_SEC,
+                base_timeout=config.JOB_TIMEOUT_SEC,
                 chromium_path=config.CHROMIUM_PATH,
                 cwd=workdir,
+                chunk_size=config.CHUNK_SIZE,
+                max_retries=config.CHUNK_MAX_RETRIES,
+                progress_cb=on_chunk_progress,
             )
             self._complete(job, 4, "PDF rendered")
 

@@ -56,6 +56,21 @@ MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 # Cover thumbnail width in pixels (aspect ratio preserved).
 COVER_THUMB_WIDTH = int(os.getenv("COVER_THUMB_WIDTH", "200"))
 
+# --- Chunked rendering (large-book resilience) -----------------------------
+# Maximum number of spine items (chapters) per rendering chunk. Books with
+# more spine items than this are split into chunks, each rendered to a
+# separate PDF and then merged. Set to 0 to disable chunking.
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "50"))
+
+# How many times to retry a failed chunk render before giving up.
+CHUNK_MAX_RETRIES = int(os.getenv("CHUNK_MAX_RETRIES", "2"))
+
+# Adaptive per-chunk timeout = base + (spine items in chunk) * per_item.
+ADAPTIVE_TIMEOUT_BASE = int(os.getenv("ADAPTIVE_TIMEOUT_BASE", "60"))
+ADAPTIVE_TIMEOUT_PER_SPINE_ITEM = int(
+    os.getenv("ADAPTIVE_TIMEOUT_PER_SPINE_ITEM", "10")
+)
+
 # How many recent books to show on the convert page.
 RECENT_COUNT = int(os.getenv("RECENT_COUNT", "10"))
 
