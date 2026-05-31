@@ -22,6 +22,10 @@ allowlist.
 - **Reflowable and fixed-layout** ePUBs.
 - **Vertical text** (`writing-mode: vertical-rl`) and right-to-left reading
   progression handled correctly.
+- **Chunked rendering** — large books are automatically split into spine-item
+  chunks, each rendered separately and merged with pypdf, so big or complex
+  books that would time out or crash Chromium in one pass succeed reliably.
+  Each chunk is also retried with exponential back-off on transient errors.
 - **Bundled Noto CJK fonts** as a fallback; fonts embedded in the ePUB are
   honoured first.
 - **DRM-protected ePUBs are detected and rejected** (this tool does not strip
@@ -88,9 +92,16 @@ Copy `.env.example` to `.env` and fill it in. Key values:
 | `BASE_URL` | ✅ | e.g. `https://your-app.zeabur.app` (no trailing slash) |
 | `SESSION_SECRET` | ✅ | `python -c "import secrets; print(secrets.token_hex(32))"` |
 | `DATA_DIR` | ✅ (prod) | Point at a persistent volume |
-| `REFLOWABLE_PAGE_SIZE` | optional | Default `A5` |
-| `JOB_TIMEOUT_SEC` | optional | Default `300` |
+| `REFLOWABLE_PAGE_SIZE` | optional | Default `A5`. Vivliostyle presets: `A4`, `A5`, `B5`, `JIS-B5`, `letter`, etc., or a custom size like `105mm,148mm` |
+| `JOB_TIMEOUT_SEC` | optional | Default `300`. Base per-job timeout; adaptive chunk timeouts may exceed this |
 | `MAX_UPLOAD_MB` | optional | Default `100` |
+| `COVER_THUMB_WIDTH` | optional | Default `200` (pixels). Cover images are downscaled to this width |
+| `RECENT_COUNT` | optional | Default `10`. Number of recent books shown on the convert page |
+| `CHUNK_SIZE` | optional | Default `50`. Max spine items per rendering chunk. Set `0` to disable chunking |
+| `CHUNK_MAX_RETRIES` | optional | Default `2`. Retry attempts per failed chunk (with exponential back-off) |
+| `ADAPTIVE_TIMEOUT_BASE` | optional | Default `60` (seconds). Fixed part of the per-chunk adaptive timeout |
+| `ADAPTIVE_TIMEOUT_PER_SPINE_ITEM` | optional | Default `10` (seconds per spine item). Variable part of the per-chunk adaptive timeout |
+| `CHROMIUM_PATH` | optional | Default `/usr/bin/chromium`. Path to the Chromium/Chrome binary used by Vivliostyle |
 
 ---
 
@@ -144,7 +155,15 @@ and you haven't added yourself as a test user.
 Headless Chromium uses shared memory (`/dev/shm`), which defaults to a small
 size in containers and can cause crashes on big/fixed-layout books. If you hit
 this, increase the container's shared memory (e.g. a larger `shm-size`, or a
-`/dev/shm` mount with more space) and/or raise `JOB_TIMEOUT_SEC`.
+`/dev/shm` mount with more space) and/or raise `JOB_TIMEOUT_SEC`. Chunked
+rendering (controlled by `CHUNK_SIZE`) already helps here; reducing `CHUNK_SIZE`
+further (e.g. `20`) gives each chunk less work to do per Chromium invocation.
+
+**A chunk fails and the whole job aborts.**
+The app retries each chunk up to `CHUNK_MAX_RETRIES` times with exponential
+back-off. If retries are exhausted, try reducing `CHUNK_SIZE` so chunks are
+smaller, or increase `ADAPTIVE_TIMEOUT_BASE` / `ADAPTIVE_TIMEOUT_PER_SPINE_ITEM`
+to give each chunk more time.
 
 **Chinese/Japanese/Korean glyphs missing or boxes (tofu).**
 The image bundles `fonts-noto-cjk` + `fonts-noto-cjk-extra`. If a book embeds
