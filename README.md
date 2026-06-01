@@ -197,3 +197,16 @@ probably doesn't set `vertical-rl`.
   single-user tool; if you prefer, run the container as a non-root user.
 - Vivliostyle is AGPLv3. Running it as a private single-user tool does not
   trigger the network-distribution clause.
+- **Chunked rendering limitations**: When a book is large enough to be split into
+  chunks, the following fidelity trade-offs apply:
+  - **PDF bookmarks (TOC)**: Each chunk's TOC bookmarks only cover chapters
+    within that chunk. The merged PDF may have a fragmented or mis-targeted
+    outline.
+  - **Cross-chapter hyperlinks**: Internal links that reference a chapter in a
+    different chunk cannot be resolved and will be broken in the final PDF.
+  - **Page numbering / running heads**: These reset at each chunk boundary
+    because each chunk is rendered as an independent document.
+  
+  These are inherent to the split-and-merge approach. For books where TOC
+  bookmarks and cross-chapter links are critical, set `CHUNK_SIZE=0` to disable
+  chunking (at the risk of longer render times or timeouts for very large books).

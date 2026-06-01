@@ -372,6 +372,11 @@
                     if (data.status === 'running' && data.current_step > 0) {
                         if (!stepDivs[data.current_step]) {
                             showActiveStep(data.current_step, totalSteps, data.current_label);
+                        } else if (stepDivs[data.current_step].dataset.status === 'active') {
+                            // Update the label text for an existing active step (e.g. chunk progress).
+                            const div = stepDivs[data.current_step];
+                            const newText = 'Step ' + data.current_step + '/' + totalSteps + ': ' + data.current_label + ' ';
+                            div.firstChild.textContent = newText;
                         }
                     }
 

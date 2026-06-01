@@ -72,9 +72,12 @@ def list_books(limit: int | None = None) -> list[dict]:
     return books
 
 
+_COVER_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"}
+
+
 def cover_path(name: str) -> Path | None:
     p = _safe_member(name)
-    if p and p.exists() and p.is_file():
+    if p and p.exists() and p.is_file() and p.suffix.lower() in _COVER_EXTENSIONS:
         return p
     return None
 
