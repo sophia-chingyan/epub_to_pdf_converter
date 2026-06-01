@@ -388,9 +388,14 @@ def _render_with_retry(
     cwd: Path | None = None,
     max_retries: int = 2,
 ) -> None:
-    """Render a single PDF with exponential-backoff retry on transient errors."""
+    """Render a single PDF with exponential-backoff retry on transient errors.
+
+    The initial attempt always runs. If it fails with a transient error, up to
+    *max_retries* additional attempts are made (so total attempts = 1 + max_retries).
+    """
     last_err: EpubError | None = None
-    for attempt in range(1, max_retries + 1):
+    total_attempts = 1 + max(0, max_retries)
+    for attempt in range(1, total_attempts + 1):
         try:
             # Scale timeout upward on retries.
             attempt_timeout = timeout * attempt
@@ -406,9 +411,11 @@ def _render_with_retry(
             msg = str(e).lower()
             if any(kw in msg for kw in _NON_RETRYABLE_KEYWORDS):
                 raise
-            if attempt < max_retries:
+            if attempt < total_attempts:
                 time.sleep(_RETRY_BACKOFF_BASE_SEC * (2 ** (attempt - 1)))
-    raise last_err  # type: ignore[misc]
+    if last_err is None:
+        raise EpubError("Rendering failed (no error details captured).")
+    raise last_err
 
 
 def merge_pdfs(pdf_paths: list[Path], out_path: Path) -> None:
@@ -444,8 +451,8 @@ def render_pdf_chunked(
     """
     opf_path, opf_root, idrefs = extract_spine_idrefs(epub_path)
 
-    # --- small book → single render (no chunking overhead) ---
-    if not idrefs or len(idrefs) <= chunk_size:
+    # --- small book or chunking disabled → single render (no chunking overhead) ---
+    if not idrefs or chunk_size <= 0 or len(idrefs) <= chunk_size:
         timeout = max(base_timeout, estimate_chunk_timeout(len(idrefs)))
         _render_with_retry(
             epub_path, out_pdf, info,
@@ -487,7 +494,7 @@ def render_pdf_chunked(
             except EpubError as e:
                 raise EpubError(
                     f"Chunk {idx + 1}/{len(chunks)} failed after "
-                    f"{max_retries} attempt(s): {e}"
+                    f"{1 + max(0, max_retries)} attempt(s): {e}"
                 ) from e
             finally:
                 chunk_epub.unlink(missing_ok=True)

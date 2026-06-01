@@ -63,6 +63,8 @@ COVER_THUMB_WIDTH = int(os.getenv("COVER_THUMB_WIDTH", "200"))
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "50"))
 
 # How many times to retry a failed chunk render before giving up.
+# The initial attempt always runs; this controls additional retries on
+# transient errors (total attempts = 1 + CHUNK_MAX_RETRIES).
 CHUNK_MAX_RETRIES = int(os.getenv("CHUNK_MAX_RETRIES", "2"))
 
 # Adaptive per-chunk timeout = base + (spine items in chunk) * per_item.
