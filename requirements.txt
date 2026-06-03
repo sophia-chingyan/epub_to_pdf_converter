@@ -7,3 +7,4 @@ itsdangerous>=2.1
 httpx>=0.27
 pillow>=10.2
 pypdf>=4.0
+ocrmypdf>=16.0

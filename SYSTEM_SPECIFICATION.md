@@ -288,7 +288,7 @@ Sessions use Starlette's `SessionMiddleware` with a signed (HMAC) cookie backed 
 
 ## 8. Conversion Pipeline
 
-Each job runs the following 5-step pipeline in a background daemon thread:
+Each job runs the following pipeline in a background daemon thread:
 
 | Step | Label | Action |
 |---|---|---|
@@ -296,7 +296,11 @@ Each job runs the following 5-step pipeline in a background daemon thread:
 | 2 | Extracting metadata & cover | `converter.extract_info()` — reads OPF for title, layout, page direction, cover image |
 | 3 | Preparing Vivliostyle | Determines layout mode (fixed/reflowable) for the render command |
 | 4 | Rendering PDF | `converter.render_pdf_chunked()` — invokes Vivliostyle (see §8.1) |
-| 5 | Saving to library | `jobs.JobManager._store()` — moves PDF + cover + sidecar to `LIBRARY_DIR` |
+| 5 | Checking text layer | `converter.detect_pua_text()` — samples PDF text for PUA obfuscation (auto mode only) |
+| 6 | Rebuilding text layer via OCR | `converter.add_text_layer()` — runs ocrmypdf to replace PUA text with real Unicode (see §8.4) |
+| 7 | Saving to library | `jobs.JobManager._store()` — moves PDF + cover + sidecar to `LIBRARY_DIR` |
+
+Steps 5–6 are conditional: in `auto` mode (default) they only run when PUA obfuscation is detected; in `always` mode OCR always runs; in `off` mode they are skipped entirely.
 
 ### 8.1 Chunked Rendering
 
@@ -318,6 +322,21 @@ For small books (spine items ≤ `CHUNK_SIZE`) the chunking overhead is skipped 
 ### 8.3 Adaptive Timeout
 
 Per-chunk timeout = `ADAPTIVE_TIMEOUT_BASE + len(chunk_idrefs) × ADAPTIVE_TIMEOUT_PER_SPINE_ITEM`, with a minimum of `JOB_TIMEOUT_SEC`.
+
+### 8.4 PUA Detection and OCR Text Layer Rebuild
+
+Some commercial CJK ePUBs use a "glyph-shuffling" anti-copy scheme: the text is encoded in Unicode Private Use Area (PUA) codepoints (`U+E000–F8FF`, `U+F0000–FFFFF`, `U+100000–10FFFD`) and the embedded fonts map those PUA slots to the correct glyph shapes. The visual output is pixel-perfect, but the text layer is unreadable — copy/paste, search, screen readers, and translation tools all get PUA gibberish.
+
+This is **not** a bug in the rendering pipeline. The app faithfully preserves what the ePUB contains. There is no formal DRM (`encryption.xml` passes validation), just obfuscated text encoding.
+
+**Detection** (`converter.detect_pua_text`): After rendering, the app extracts text from the first N pages of the PDF using pypdf and computes the fraction of non-ASCII characters that fall in PUA ranges. If this fraction exceeds `PUA_THRESHOLD` (default 20%), the book is considered PUA-obfuscated.
+
+**OCR rebuild** (`converter.add_text_layer`): The app shells out to `ocrmypdf` with the configured `OCR_LANGS`. It first tries `--redo-ocr`, which strips the existing (bogus) text layer and re-OCRs while keeping the crisp vector glyphs intact. If `--redo-ocr` fails (e.g. unsupported page structure), it falls back to `--force-ocr`, which rasterizes pages before OCR (file size grows, but accuracy is maintained).
+
+**Caveats:**
+- OCR may introduce occasional character errors compared to the publisher's exact text.
+- Vertical-text pages benefit from Tesseract's vertical models (`chi_tra_vert`, `jpn_vert`). Users can add these to `OCR_LANGS` if the models are installed.
+- OCR adds significant processing time; the `auto` mode ensures this cost is only paid for obfuscated books.
 
 ---
 
@@ -392,6 +411,9 @@ All settings are read from environment variables. Copy `env.example` to `.env` a
 | `CHUNK_MAX_RETRIES` | `2` | Retry attempts per failed chunk (with exponential back-off) |
 | `ADAPTIVE_TIMEOUT_BASE` | `60` | Fixed part of per-chunk adaptive timeout (seconds) |
 | `ADAPTIVE_TIMEOUT_PER_SPINE_ITEM` | `10` | Variable part of per-chunk adaptive timeout (seconds per spine item) |
+| `TEXT_LAYER_MODE` | `auto` | When to run OCR: `auto` (only PUA-obfuscated books), `always`, or `off` |
+| `OCR_LANGS` | `chi_tra+chi_sim+jpn+kor+eng` | Tesseract language string for OCR |
+| `PUA_THRESHOLD` | `0.20` | Fraction of PUA characters to trigger OCR in `auto` mode (0.0–1.0) |
 
 ---
 
@@ -491,3 +513,5 @@ uvicorn app:app --reload --port 8000
 | `/dev/shm` constraint | Chromium uses shared memory; the default container limit can cause crashes on large or fixed-layout books |
 | Vertical text requires source CSS | Vivliostyle honours `writing-mode` from the ePUB's own CSS. If the source book does not declare `vertical-rl`, the output will be horizontal |
 | No test suite in repo | The module separation (especially `build_vivliostyle_cmd` as a pure function) is designed for testability, but no automated tests are currently present |
+| PUA-obfuscated text | Some commercial CJK ePUBs use PUA codepoints as an anti-copy measure. The app auto-detects this and rebuilds the text layer via OCR (`TEXT_LAYER_MODE=auto`). OCR may introduce occasional character errors vs. the publisher's exact text. Vertical text benefits from Tesseract vertical models (`chi_tra_vert`, `jpn_vert`) |
+| OCR processing time | OCR (via ocrmypdf + Tesseract) adds significant time to conversion. In `auto` mode this cost is only paid for PUA-obfuscated books; clean books skip OCR entirely |

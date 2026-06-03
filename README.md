@@ -30,6 +30,10 @@ allowlist.
   honoured first.
 - **DRM-protected ePUBs are detected and rejected** (this tool does not strip
   DRM).
+- **PUA text layer detection and OCR rebuild** — some CJK ePUBs use Private
+  Use Area font obfuscation that renders perfectly but produces unselectable /
+  unsearchable text. The app auto-detects this and rebuilds the text layer via
+  OCR (ocrmypdf + Tesseract), so copy/paste, search, and screen readers work.
 - **Google sign-in** restricted to your own account.
 
 ---
@@ -101,6 +105,9 @@ Copy `.env.example` to `.env` and fill it in. Key values:
 | `CHUNK_MAX_RETRIES` | optional | Default `2`. Retry attempts per failed chunk (with exponential back-off) |
 | `ADAPTIVE_TIMEOUT_BASE` | optional | Default `60` (seconds). Fixed part of the per-chunk adaptive timeout |
 | `ADAPTIVE_TIMEOUT_PER_SPINE_ITEM` | optional | Default `10` (seconds per spine item). Variable part of the per-chunk adaptive timeout |
+| `TEXT_LAYER_MODE` | optional | Default `auto`. When to run OCR: `auto` (PUA-obfuscated books only), `always`, or `off` |
+| `OCR_LANGS` | optional | Default `chi_tra+chi_sim+jpn+kor+eng`. Tesseract languages for OCR |
+| `PUA_THRESHOLD` | optional | Default `0.20`. Fraction of PUA chars to trigger OCR in auto mode |
 | `CHROMIUM_PATH` | optional | Default `/usr/bin/chromium`. Path to the Chromium/Chrome binary used by Vivliostyle |
 
 ---
@@ -197,6 +204,16 @@ probably doesn't set `vertical-rl`.
   single-user tool; if you prefer, run the container as a non-root user.
 - Vivliostyle is AGPLv3. Running it as a private single-user tool does not
   trigger the network-distribution clause.
+- **PUA-obfuscated text**: Some commercial CJK ePUBs encode text in Unicode
+  Private Use Area codepoints (a soft anti-copy measure). The PDF looks perfect,
+  but copy/paste/search returns gibberish. In `auto` mode (default) the app
+  detects this and rebuilds the text layer via OCR. A small "text layer rebuilt
+  via OCR" note is stored in the book's metadata. Caveats:
+  - OCR may introduce occasional character errors vs. the publisher's exact text.
+  - Vertical-text pages benefit from Tesseract vertical models (`chi_tra_vert`,
+    `jpn_vert`) — add them to `OCR_LANGS` if installed.
+  - OCR adds processing time; the `auto` mode only pays this cost for obfuscated
+    books.
 - **Chunked rendering limitations**: When a book is large enough to be split into
   chunks, the following fidelity trade-offs apply:
   - **PDF bookmarks (TOC)**: Each chunk's TOC bookmarks only cover chapters
