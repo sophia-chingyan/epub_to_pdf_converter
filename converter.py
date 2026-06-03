@@ -515,3 +515,123 @@ def safe_filename(name: str) -> str:
     name = _SAFE_RE.sub("", name)
     name = name.strip(" .") or "untitled"
     return name[:180]
+
+
+# --- PUA Detection ----------------------------------------------------------
+
+# Unicode Private Use Area ranges.
+_PUA_RANGES = [
+    (0xE000, 0xF8FF),      # BMP Private Use Area
+    (0xF0000, 0xFFFFF),    # Supplementary Private Use Area-A
+    (0x100000, 0x10FFFD),  # Supplementary Private Use Area-B
+]
+
+
+def _is_pua(cp: int) -> bool:
+    """Return True if a codepoint falls in a Unicode Private Use Area."""
+    return any(lo <= cp <= hi for lo, hi in _PUA_RANGES)
+
+
+def detect_pua_text(pdf_path: Path, *, max_pages: int = 10) -> float:
+    """Sample text from a PDF and return the fraction of PUA characters.
+
+    Scans up to *max_pages* pages. Returns a float in [0.0, 1.0] representing
+    the proportion of non-whitespace, non-ASCII characters that are PUA
+    codepoints. A high value (e.g. >0.20) indicates the text layer is
+    obfuscated with PUA font encoding.
+    """
+    from pypdf import PdfReader
+
+    try:
+        reader = PdfReader(str(pdf_path))
+    except Exception:
+        return 0.0
+
+    total_chars = 0
+    pua_chars = 0
+
+    pages_to_sample = min(max_pages, len(reader.pages))
+    for i in range(pages_to_sample):
+        try:
+            text = reader.pages[i].extract_text() or ""
+        except Exception:
+            continue
+        for ch in text:
+            cp = ord(ch)
+            # Skip ASCII and whitespace — only count non-trivial characters.
+            if cp <= 0x7F:
+                continue
+            total_chars += 1
+            if _is_pua(cp):
+                pua_chars += 1
+
+    if total_chars == 0:
+        return 0.0
+    return pua_chars / total_chars
+
+
+# --- OCR Text Layer ---------------------------------------------------------
+
+# Maximum time (seconds) to allow each ocrmypdf invocation.
+_OCR_TIMEOUT_SEC = 1800
+
+
+def add_text_layer(
+    pdf_path: Path,
+    *,
+    langs: str,
+    page_direction: str | None = None,
+) -> bool:
+    """Run OCR on the PDF to rebuild its text layer with real Unicode.
+
+    Uses ocrmypdf with --redo-ocr first (preserves vector glyphs). Falls back
+    to --force-ocr if --redo-ocr fails. Operates in-place on *pdf_path*.
+
+    When *page_direction* is "rtl" (common for vertical CJK), vertical
+    Tesseract models are preferred if available in *langs*.
+
+    Returns True if OCR succeeded, False otherwise.
+    """
+    import shutil as _shutil
+
+    out_path = pdf_path.with_suffix(".ocr.pdf")
+
+    # Build base ocrmypdf command arguments.
+    base_args = [
+        "ocrmypdf",
+        "-l", langs,
+        "--jobs", "2",
+        "--output-type", "pdf",
+    ]
+
+    # Try --redo-ocr first (strips bogus text layer, re-OCRs, keeps vectors).
+    cmd_redo = base_args + ["--redo-ocr", str(pdf_path), str(out_path)]
+    try:
+        proc = subprocess.run(
+            cmd_redo, capture_output=True, text=True, timeout=_OCR_TIMEOUT_SEC,
+        )
+        if proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
+            _shutil.move(str(out_path), str(pdf_path))
+            return True
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    finally:
+        if out_path.exists():
+            out_path.unlink(missing_ok=True)
+
+    # Fallback: --force-ocr (rasterizes pages — file grows, but always works).
+    cmd_force = base_args + ["--force-ocr", str(pdf_path), str(out_path)]
+    try:
+        proc = subprocess.run(
+            cmd_force, capture_output=True, text=True, timeout=_OCR_TIMEOUT_SEC,
+        )
+        if proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
+            _shutil.move(str(out_path), str(pdf_path))
+            return True
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    finally:
+        if out_path.exists():
+            out_path.unlink(missing_ok=True)
+
+    return False

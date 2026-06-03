@@ -73,6 +73,21 @@ ADAPTIVE_TIMEOUT_PER_SPINE_ITEM = int(
     os.getenv("ADAPTIVE_TIMEOUT_PER_SPINE_ITEM", "10")
 )
 
+# --- OCR / Text Layer -------------------------------------------------------
+# Controls when OCR is applied to rebuild the text layer.
+# "auto" = detect PUA-obfuscated text and OCR only those books.
+# "always" = always run OCR on every converted PDF.
+# "off" = never run OCR (fastest; text layer may be PUA gibberish).
+TEXT_LAYER_MODE = os.getenv("TEXT_LAYER_MODE", "auto").lower()
+
+# Tesseract language string for OCR. Multiple languages joined with "+".
+OCR_LANGS = os.getenv("OCR_LANGS", "chi_tra+chi_sim+jpn+kor+eng")
+
+# Fraction of extracted characters in PUA ranges that triggers OCR in "auto"
+# mode. Range 0.0–1.0; default 0.20 means if ≥20% of sampled characters are
+# PUA, the text layer is considered obfuscated.
+PUA_THRESHOLD = float(os.getenv("PUA_THRESHOLD", "0.20"))
+
 # How many recent books to show on the convert page.
 RECENT_COUNT = int(os.getenv("RECENT_COUNT", "10"))
 

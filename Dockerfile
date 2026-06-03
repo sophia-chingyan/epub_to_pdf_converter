@@ -10,11 +10,18 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PORT=8000
 
 # System packages: Chromium (pulls its own runtime libs), Noto CJK fonts,
+# OCR tooling (ocrmypdf + Tesseract with CJK language packs), Ghostscript,
 # and the tools needed to add the NodeSource repo.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         chromium \
         fonts-noto-cjk fonts-noto-cjk-extra fonts-noto-core \
         curl ca-certificates gnupg \
+        ghostscript \
+        tesseract-ocr \
+        tesseract-ocr-chi-tra \
+        tesseract-ocr-chi-sim \
+        tesseract-ocr-jpn \
+        tesseract-ocr-kor \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js 20 (Vivliostyle CLI requires Node >= 20).

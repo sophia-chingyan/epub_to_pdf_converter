@@ -132,9 +132,42 @@ class JobManager:
             )
             self._complete(job, 4, "PDF rendered")
 
-            self._begin(job, 5, "Saving to library")
-            output_name = self._store(info, tmp_pdf)
-            self._complete(job, 5, "Saved")
+            # --- Step 4.5: OCR text layer rebuild (if needed) ---
+            ocr_note = None
+            text_layer_mode = config.TEXT_LAYER_MODE
+            if text_layer_mode == "always":
+                run_ocr = True
+            elif text_layer_mode == "auto":
+                self._begin(job, 5, "Checking text layer for PUA obfuscation")
+                pua_fraction = converter.detect_pua_text(tmp_pdf)
+                run_ocr = pua_fraction >= config.PUA_THRESHOLD
+                if run_ocr:
+                    self._complete(
+                        job, 5,
+                        f"PUA detected ({pua_fraction:.0%}) — rebuilding text layer",
+                    )
+                else:
+                    self._complete(job, 5, "Text layer is clean")
+            else:
+                run_ocr = False
+
+            if run_ocr:
+                self._begin(job, 6, "Rebuilding text layer via OCR")
+                ocr_ok = converter.add_text_layer(
+                    tmp_pdf,
+                    langs=config.OCR_LANGS,
+                    page_direction=info.page_direction,
+                )
+                if ocr_ok:
+                    ocr_note = "text layer rebuilt via OCR"
+                    self._complete(job, 6, "Text layer rebuilt")
+                else:
+                    ocr_note = "OCR attempted but failed; text layer may be unusable"
+                    self._complete(job, 6, "OCR failed (visual PDF is still correct)")
+
+            self._begin(job, 7, "Saving to library")
+            output_name = self._store(info, tmp_pdf, ocr_note=ocr_note)
+            self._complete(job, 7, "Saved")
 
             self._finish(job, output_name)
         except EpubError as e:
@@ -151,7 +184,7 @@ class JobManager:
                 if self._active_id == job.id:
                     self._active_id = None
 
-    def _store(self, info: converter.EpubInfo, tmp_pdf: Path) -> str:
+    def _store(self, info: converter.EpubInfo, tmp_pdf: Path, *, ocr_note: str | None = None) -> str:
         """Move the PDF + cover + sidecar metadata into the library."""
         config.ensure_dirs()
         stem = converter.safe_filename(info.title)
@@ -171,6 +204,8 @@ class JobManager:
             "cover": cover_name,
             "fixed_layout": info.fixed_layout,
         }
+        if ocr_note:
+            meta["ocr_note"] = ocr_note
         (config.LIBRARY_DIR / f"{base}.meta.json").write_text(
             json.dumps(meta, ensure_ascii=False), encoding="utf-8"
         )
