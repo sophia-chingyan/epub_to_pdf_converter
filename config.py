@@ -81,7 +81,7 @@ ADAPTIVE_TIMEOUT_PER_SPINE_ITEM = int(
 TEXT_LAYER_MODE = os.getenv("TEXT_LAYER_MODE", "auto").lower()
 
 # Tesseract language string for OCR. Multiple languages joined with "+".
-OCR_LANGS = os.getenv("OCR_LANGS", "chi_tra+chi_sim+jpn+kor+eng")
+OCR_LANGS = os.getenv("OCR_LANGS", "chi_tra+chi_sim+jpn+kor+eng+chi_tra_vert+jpn_vert")
 
 # Fraction of extracted characters in PUA ranges that triggers OCR in "auto"
 # mode. Range 0.0–1.0; default 0.20 means if ≥20% of sampled characters are
