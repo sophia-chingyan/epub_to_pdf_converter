@@ -22,6 +22,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tesseract-ocr-chi-sim \
         tesseract-ocr-jpn \
         tesseract-ocr-kor \
+        tesseract-ocr-chi-tra-vert \
+        tesseract-ocr-jpn-vert \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js 20 (Vivliostyle CLI requires Node >= 20).

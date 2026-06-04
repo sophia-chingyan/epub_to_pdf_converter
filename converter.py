@@ -581,18 +581,41 @@ def add_text_layer(
     *,
     langs: str,
     page_direction: str | None = None,
+    reason: str = "always",
+    pua_threshold: float = 0.20,
 ) -> bool:
     """Run OCR on the PDF to rebuild its text layer with real Unicode.
 
-    Uses ocrmypdf with --redo-ocr first (preserves vector glyphs). Falls back
-    to --force-ocr if --redo-ocr fails. Operates in-place on *pdf_path*.
+    When *reason* is ``"pua"``, the existing text layer is known to be
+    PUA-obfuscated.  In that case ``--force-ocr`` is used as the primary
+    strategy (rasterizes pages, lays down a fresh Unicode layer) because
+    ``--redo-ocr`` treats PUA text as valid and silently preserves it.
+
+    When *reason* is ``"always"`` (generic mode), ``--redo-ocr`` is tried
+    first to preserve vector glyphs, falling back to ``--force-ocr`` only on
+    failure.
+
+    After OCR, the output is verified by re-running PUA detection.  The
+    rebuild is considered successful only if the PUA fraction drops below
+    *pua_threshold*.
 
     When *page_direction* is "rtl" (common for vertical CJK), vertical
-    Tesseract models are preferred if available in *langs*.
+    Tesseract models are appended to *langs* if not already present.
 
-    Returns True if OCR succeeded, False otherwise.
+    Operates in-place on *pdf_path*.  Returns True if OCR succeeded and
+    verification passed, False otherwise.
     """
     import shutil as _shutil
+
+    # Append vertical CJK models when page direction suggests vertical text.
+    if page_direction == "rtl":
+        existing = langs.split("+")
+        vert_models = []
+        for model in ("chi_tra_vert", "jpn_vert"):
+            if model not in existing:
+                vert_models.append(model)
+        if vert_models:
+            langs = langs + "+" + "+".join(vert_models)
 
     out_path = pdf_path.with_suffix(".ocr.pdf")
 
@@ -604,34 +627,42 @@ def add_text_layer(
         "--output-type", "pdf",
     ]
 
-    # Try --redo-ocr first (strips bogus text layer, re-OCRs, keeps vectors).
-    cmd_redo = base_args + ["--redo-ocr", str(pdf_path), str(out_path)]
-    try:
-        proc = subprocess.run(
-            cmd_redo, capture_output=True, text=True, timeout=_OCR_TIMEOUT_SEC,
-        )
-        if proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
-            _shutil.move(str(out_path), str(pdf_path))
-            return True
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-    finally:
-        if out_path.exists():
-            out_path.unlink(missing_ok=True)
+    def _run_ocr(strategy: str) -> bool:
+        """Run ocrmypdf with the given strategy flag. Returns True on success."""
+        cmd = base_args + [strategy, str(pdf_path), str(out_path)]
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=_OCR_TIMEOUT_SEC,
+            )
+            if proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
+                _shutil.move(str(out_path), str(pdf_path))
+                return True
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        finally:
+            if out_path.exists():
+                out_path.unlink(missing_ok=True)
+        return False
 
-    # Fallback: --force-ocr (rasterizes pages — file grows, but always works).
-    cmd_force = base_args + ["--force-ocr", str(pdf_path), str(out_path)]
-    try:
-        proc = subprocess.run(
-            cmd_force, capture_output=True, text=True, timeout=_OCR_TIMEOUT_SEC,
-        )
-        if proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
-            _shutil.move(str(out_path), str(pdf_path))
-            return True
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-    finally:
-        if out_path.exists():
-            out_path.unlink(missing_ok=True)
+    if reason == "pua":
+        # PUA-detected: --force-ocr is the only reliable strategy.
+        # --redo-ocr treats PUA text as valid and preserves it.
+        strategies = ["--force-ocr"]
+    else:
+        # Generic "always" mode: try --redo-ocr first (preserves vectors),
+        # fall back to --force-ocr.
+        strategies = ["--redo-ocr", "--force-ocr"]
+
+    for strategy in strategies:
+        if _run_ocr(strategy):
+            # Verify the PUA text is actually gone.
+            pua_fraction = detect_pua_text(pdf_path)
+            if pua_fraction < pua_threshold:
+                return True
+            # PUA still present — if we haven't tried --force-ocr yet, escalate.
+            if strategy != "--force-ocr":
+                continue
+            # --force-ocr also failed verification — give up.
+            return False
 
     return False

@@ -153,10 +153,13 @@ class JobManager:
 
             if run_ocr:
                 self._begin(job, 6, "Rebuilding text layer via OCR")
+                ocr_reason = "pua" if text_layer_mode == "auto" else "always"
                 ocr_ok = converter.add_text_layer(
                     tmp_pdf,
                     langs=config.OCR_LANGS,
                     page_direction=info.page_direction,
+                    reason=ocr_reason,
+                    pua_threshold=config.PUA_THRESHOLD,
                 )
                 if ocr_ok:
                     ocr_note = "text layer rebuilt via OCR"
