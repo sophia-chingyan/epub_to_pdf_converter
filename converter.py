@@ -684,6 +684,11 @@ def resolve_ocr_langs(requested: str) -> tuple[str, list[str]]:
 
 # --- OCR language mapping ---------------------------------------------------
 
+# CJK Tesseract models already include Latin character recognition; adding eng
+# to these causes Asian characters to be misread as English text.
+_CJK_MODELS = frozenset({"chi_tra", "chi_sim", "jpn", "kor"})
+
+
 def _map_lang_to_tesseract(tag: str) -> list[str] | None:
     """Map a BCP 47 language tag to Tesseract horizontal language codes.
 
@@ -718,14 +723,20 @@ def build_ocr_langs(epub_language: str | None, configured_langs: str) -> str:
     """Build a focused Tesseract language string from the ePUB's language tag.
 
     For a recognised language, returns a targeted string — the primary script
-    plus English (for embedded Latin text) — rather than the full configured
-    list. Tesseract is measurably more accurate with fewer languages because its
-    dictionary and N-gram models are not competing across unrelated scripts.
+    only for CJK languages, or the primary script plus English for non-CJK
+    languages — rather than the full configured list. Tesseract is measurably
+    more accurate with fewer languages because its dictionary and N-gram models
+    are not competing across unrelated scripts.
+
+    CJK models (chi_tra, chi_sim, jpn, kor) already include Latin character
+    recognition, so appending ``eng`` is unnecessary and actively harmful: it
+    causes Tesseract to misrecognise Asian characters as English text.
 
     Example outcomes:
-      zh-TW  →  chi_tra+eng          (not chi_tra+chi_sim+jpn+kor+eng)
-      ja     →  jpn+eng
-      zh     →  chi_tra+chi_sim+eng
+      zh-TW  →  chi_tra              (CJK model handles embedded Latin)
+      ja     →  jpn
+      zh     →  chi_tra+chi_sim
+      en     →  eng
 
     Falls back to *configured_langs* when the tag is absent or unrecognised, so
     books in languages outside the mapping still OCR with the operator's chosen
@@ -737,7 +748,10 @@ def build_ocr_langs(epub_language: str | None, configured_langs: str) -> str:
     if primary is None:
         return configured_langs
     langs = list(primary)
-    if "eng" not in langs:
+    # CJK Tesseract models already include Latin character recognition;
+    # adding eng causes Asian characters to be misread as English text.
+    is_cjk = any(code in _CJK_MODELS for code in langs)
+    if not is_cjk and "eng" not in langs:
         langs.append("eng")
     return "+".join(langs)
 
