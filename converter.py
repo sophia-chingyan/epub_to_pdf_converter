@@ -8,6 +8,7 @@ invoked as a subprocess.
 from __future__ import annotations
 
 import copy
+import functools
 import io
 import posixpath
 import re
@@ -442,36 +443,57 @@ def render_pdf_chunked(
     cwd: Path | None = None,
     chunk_size: int,
     max_retries: int,
-    progress_cb: Callable[[int, int], None] | None = None,
-) -> None:
+    progress_cb: Callable[[str], None] | None = None,
+    ocr_mode: str = "off",
+    ocr_langs: str = "eng",
+    pua_threshold: float = 0.20,
+) -> "OcrOutcome":
     """Render a (potentially large) EPUB in chunks, with retry per chunk.
 
     For small books (spine items <= *chunk_size*) this falls through to a
     single render pass, still benefiting from retry and adaptive timeout.
+
+    The text layer is rebuilt **per chunk** (before merging), not on the final
+    merged PDF. This keeps every OCR job small (at most *chunk_size* pages),
+    so a large book can't blow past the per-invocation OCR timeout. Returns an
+    :class:`OcrOutcome` aggregating what happened across all units.
     """
     opf_path, opf_root, idrefs = extract_spine_idrefs(epub_path)
 
     # --- small book or chunking disabled → single render (no chunking overhead) ---
     if not idrefs or chunk_size <= 0 or len(idrefs) <= chunk_size:
         timeout = max(base_timeout, estimate_chunk_timeout(len(idrefs)))
+        if progress_cb:
+            progress_cb("Rendering PDF")
         _render_with_retry(
             epub_path, out_pdf, info,
             size=size, timeout=timeout,
             chromium_path=chromium_path, cwd=cwd,
             max_retries=max_retries,
         )
-        return
+        if ocr_mode == "off":
+            return OcrOutcome()
+        if progress_cb:
+            progress_cb("Checking / rebuilding text layer")
+        return ocr_pdf_if_needed(
+            out_pdf,
+            mode=ocr_mode, langs=ocr_langs,
+            page_direction=info.page_direction,
+            pua_threshold=pua_threshold,
+        )
 
-    # --- large book → split, render chunks, merge ---
+    # --- large book → split, render + OCR each chunk, merge ---
     chunks = [idrefs[i:i + chunk_size]
               for i in range(0, len(idrefs), chunk_size)]
     work = cwd or out_pdf.parent
     chunk_pdfs: list[Path] = []
+    outcome = OcrOutcome()
 
     try:
         for idx, chunk_idrefs in enumerate(chunks):
+            n = len(chunks)
             if progress_cb:
-                progress_cb(idx + 1, len(chunks))
+                progress_cb(f"Rendering chunk {idx + 1}/{n}")
 
             chunk_epub = work / f"chunk_{idx}.epub"
             chunk_pdf = work / f"chunk_{idx}.pdf"
@@ -490,19 +512,37 @@ def render_pdf_chunked(
                     chromium_path=chromium_path, cwd=cwd,
                     max_retries=max_retries,
                 )
-                chunk_pdfs.append(chunk_pdf)
             except EpubError as e:
                 raise EpubError(
-                    f"Chunk {idx + 1}/{len(chunks)} failed after "
+                    f"Chunk {idx + 1}/{n} failed after "
                     f"{1 + max(0, max_retries)} attempt(s): {e}"
                 ) from e
             finally:
                 chunk_epub.unlink(missing_ok=True)
 
+            # Rebuild this chunk's text layer before it is merged. Doing it here
+            # (rather than on the merged PDF) bounds each OCR job to chunk_size
+            # pages.
+            if ocr_mode != "off":
+                if progress_cb:
+                    progress_cb(f"Rebuilding text layer (chunk {idx + 1}/{n})")
+                outcome.merge(ocr_pdf_if_needed(
+                    chunk_pdf,
+                    mode=ocr_mode, langs=ocr_langs,
+                    page_direction=info.page_direction,
+                    pua_threshold=pua_threshold,
+                ))
+
+            chunk_pdfs.append(chunk_pdf)
+
+        if progress_cb:
+            progress_cb("Merging chunks")
         merge_pdfs(chunk_pdfs, out_pdf)
     finally:
         for p in chunk_pdfs:
             p.unlink(missing_ok=True)
+
+    return outcome
 
 
 # --- Filename helpers -------------------------------------------------------
@@ -532,13 +572,15 @@ def _is_pua(cp: int) -> bool:
     return any(lo <= cp <= hi for lo, hi in _PUA_RANGES)
 
 
-def detect_pua_text(pdf_path: Path, *, max_pages: int = 10) -> float:
+def detect_pua_text(pdf_path: Path, *, max_pages: int = 12) -> float:
     """Sample text from a PDF and return the fraction of PUA characters.
 
-    Scans up to *max_pages* pages. Returns a float in [0.0, 1.0] representing
-    the proportion of non-whitespace, non-ASCII characters that are PUA
-    codepoints. A high value (e.g. >0.20) indicates the text layer is
-    obfuscated with PUA font encoding.
+    Samples up to *max_pages* pages spread **evenly** across the document (so a
+    book whose front matter is plain English doesn't mask PUA-obfuscated body
+    text, and vice versa). Returns a float in [0.0, 1.0] representing the
+    proportion of non-whitespace, non-ASCII characters that are PUA codepoints.
+    A high value (e.g. >0.20) indicates the text layer is obfuscated with PUA
+    font encoding.
     """
     from pypdf import PdfReader
 
@@ -547,11 +589,19 @@ def detect_pua_text(pdf_path: Path, *, max_pages: int = 10) -> float:
     except Exception:
         return 0.0
 
+    n = len(reader.pages)
+    if n == 0:
+        return 0.0
+
+    if n <= max_pages:
+        indices = range(n)
+    else:
+        step = n / max_pages
+        indices = [int(i * step) for i in range(max_pages)]
+
     total_chars = 0
     pua_chars = 0
-
-    pages_to_sample = min(max_pages, len(reader.pages))
-    for i in range(pages_to_sample):
+    for i in indices:
         try:
             text = reader.pages[i].extract_text() or ""
         except Exception:
@@ -570,10 +620,137 @@ def detect_pua_text(pdf_path: Path, *, max_pages: int = 10) -> float:
     return pua_chars / total_chars
 
 
+# --- OCR language validation ------------------------------------------------
+
+@functools.lru_cache(maxsize=1)
+def installed_tesseract_langs() -> frozenset[str]:
+    """Return the set of language codes Tesseract has trained data for.
+
+    Cached: shelling out is cheap but the installed set cannot change while the
+    process runs. Returns an empty set if Tesseract is missing or the call
+    fails — callers treat that as "cannot validate" and pass the request
+    through unchanged (matching the previous behaviour).
+    """
+    try:
+        proc = subprocess.run(
+            ["tesseract", "--list-langs"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return frozenset()
+    if proc.returncode != 0:
+        return frozenset()
+
+    langs: set[str] = set()
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        # Skip the "List of available languages ..." header and blank lines.
+        if not line or line.lower().startswith("list of"):
+            continue
+        langs.add(line)
+    return frozenset(langs)
+
+
+def resolve_ocr_langs(requested: str) -> tuple[str, list[str]]:
+    """Filter a '+'-joined Tesseract language string down to installed models.
+
+    Returns ``(usable, dropped)``. *usable* preserves the requested order and is
+    safe to hand to ocrmypdf/Tesseract (a single missing model otherwise makes
+    the whole OCR pass abort non-zero). *dropped* lists the requested codes
+    whose data is not installed.
+
+    If the installed set can't be determined, the request is returned unchanged.
+    """
+    requested_list = [code for code in requested.split("+") if code]
+    available = installed_tesseract_langs()
+    if not available:
+        return requested, []
+    usable = [code for code in requested_list if code in available]
+    dropped = [code for code in requested_list if code not in available]
+    return "+".join(usable), dropped
+
+
 # --- OCR Text Layer ---------------------------------------------------------
 
-# Maximum time (seconds) to allow each ocrmypdf invocation.
+# Maximum time (seconds) to allow each ocrmypdf invocation. With per-chunk OCR
+# this bounds a single chunk (<= CHUNK_SIZE pages), not the whole book.
 _OCR_TIMEOUT_SEC = 1800
+
+
+@dataclass
+class OcrOutcome:
+    """Aggregate result of rebuilding the text layer across one or more units.
+
+    A "unit" is either the whole PDF (small books) or a single chunk PDF
+    (large books). Counts let us distinguish a fully rebuilt book from a
+    partially rebuilt one (some chunks failed) and report accordingly.
+    """
+    units_ocred: int = 0    # OCR ran and verification passed
+    units_failed: int = 0   # OCR was attempted but failed / didn't clear PUA
+    units_clean: int = 0    # auto mode: no obfuscation detected, skipped
+
+    def merge(self, other: "OcrOutcome") -> None:
+        self.units_ocred += other.units_ocred
+        self.units_failed += other.units_failed
+        self.units_clean += other.units_clean
+
+    @property
+    def applied(self) -> bool:
+        return self.units_ocred > 0
+
+    @property
+    def any_failed(self) -> bool:
+        return self.units_failed > 0
+
+    def note(self) -> str | None:
+        """Human-readable note for the library sidecar, or None if N/A."""
+        if self.units_ocred and self.units_failed:
+            return ("text layer partially rebuilt via OCR; "
+                    f"{self.units_failed} section(s) may remain unselectable")
+        if self.units_ocred:
+            return "text layer rebuilt via OCR"
+        if self.units_failed:
+            return "OCR attempted but failed; text layer may be unusable"
+        return None  # clean book, or OCR disabled
+
+
+def ocr_pdf_if_needed(
+    pdf_path: Path,
+    *,
+    mode: str,
+    langs: str,
+    page_direction: str | None,
+    pua_threshold: float,
+) -> OcrOutcome:
+    """Decide whether a single PDF needs OCR and, if so, rebuild its text layer.
+
+    *mode* is "auto" (OCR only when PUA obfuscation is detected), "always", or
+    "off". Operates in place. Returns an :class:`OcrOutcome` for this one unit.
+    """
+    outcome = OcrOutcome()
+    if mode == "off":
+        return outcome
+
+    if mode == "auto":
+        if detect_pua_text(pdf_path) < pua_threshold:
+            outcome.units_clean = 1
+            return outcome
+        reason = "pua"
+    else:  # "always"
+        reason = "always"
+
+    ok = add_text_layer(
+        pdf_path,
+        langs=langs,
+        page_direction=page_direction,
+        reason=reason,
+        pua_threshold=pua_threshold,
+    )
+    if ok:
+        outcome.units_ocred = 1
+    else:
+        outcome.units_failed = 1
+    return outcome
 
 
 def add_text_layer(
@@ -587,43 +764,53 @@ def add_text_layer(
     """Run OCR on the PDF to rebuild its text layer with real Unicode.
 
     When *reason* is ``"pua"``, the existing text layer is known to be
-    PUA-obfuscated.  In that case ``--force-ocr`` is used as the primary
-    strategy (rasterizes pages, lays down a fresh Unicode layer) because
-    ``--redo-ocr`` treats PUA text as valid and silently preserves it.
+    PUA-obfuscated. ``--force-ocr`` is used (rasterizes pages, lays down a
+    fresh Unicode layer) because ``--redo-ocr`` treats PUA text as valid and
+    silently preserves it.
 
-    When *reason* is ``"always"`` (generic mode), ``--redo-ocr`` is tried
-    first to preserve vector glyphs, falling back to ``--force-ocr`` only on
-    failure.
+    When *reason* is ``"always"`` (generic mode), ``--redo-ocr`` is tried first
+    to preserve vector glyphs, falling back to ``--force-ocr`` on failure.
 
-    After OCR, the output is verified by re-running PUA detection.  The
-    rebuild is considered successful only if the PUA fraction drops below
-    *pua_threshold*.
+    Language handling:
+      * For vertical text (``page_direction == "rtl"``) the vertical Tesseract
+        models are *preferred*, but only added if their data is installed.
+      * Every requested language is validated against the installed set first;
+        missing models are dropped instead of aborting the whole pass. If
+        nothing usable remains, OCR is skipped and False is returned.
 
-    When *page_direction* is "rtl" (common for vertical CJK), vertical
-    Tesseract models are appended to *langs* if not already present.
+    After OCR the output is verified by re-running PUA detection; the rebuild
+    counts as successful only if the PUA fraction drops below *pua_threshold*.
 
-    Operates in-place on *pdf_path*.  Returns True if OCR succeeded and
-    verification passed, False otherwise.
+    Operates in-place on *pdf_path*. Returns True on verified success.
     """
     import shutil as _shutil
 
-    # Append vertical CJK models when page direction suggests vertical text.
+    from config import OCR_JOBS
+
+    # Prefer vertical CJK models for vertical text (added before validation so
+    # they're kept only when actually installed).
     if page_direction == "rtl":
-        existing = langs.split("+")
-        vert_models = []
+        current = langs.split("+")
         for model in ("chi_tra_vert", "jpn_vert"):
-            if model not in existing:
-                vert_models.append(model)
-        if vert_models:
-            langs = langs + "+" + "+".join(vert_models)
+            if model not in current:
+                langs = langs + "+" + model
+
+    # Drop any requested language whose data isn't installed — a single missing
+    # model otherwise makes ocrmypdf abort with a non-zero exit, which is the
+    # classic "OCR silently did nothing" failure.
+    langs, dropped = resolve_ocr_langs(langs)
+    if dropped:
+        print(f"[ocr] dropping uninstalled Tesseract languages: {dropped}")
+    if not langs:
+        print("[ocr] no usable Tesseract languages installed; skipping OCR")
+        return False
 
     out_path = pdf_path.with_suffix(".ocr.pdf")
 
-    # Build base ocrmypdf command arguments.
     base_args = [
         "ocrmypdf",
         "-l", langs,
-        "--jobs", "2",
+        "--jobs", str(OCR_JOBS),
         "--output-type", "pdf",
     ]
 
@@ -637,8 +824,14 @@ def add_text_layer(
             if proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
                 _shutil.move(str(out_path), str(pdf_path))
                 return True
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
+            # Surface the reason so a failed OCR isn't completely silent.
+            tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-4:]
+            if tail:
+                print(f"[ocr] {strategy} failed: " + " | ".join(tail))
+        except subprocess.TimeoutExpired:
+            print(f"[ocr] {strategy} timed out after {_OCR_TIMEOUT_SEC}s")
+        except FileNotFoundError:
+            print("[ocr] ocrmypdf not found on PATH")
         finally:
             if out_path.exists():
                 out_path.unlink(missing_ok=True)
@@ -646,7 +839,6 @@ def add_text_layer(
 
     if reason == "pua":
         # PUA-detected: --force-ocr is the only reliable strategy.
-        # --redo-ocr treats PUA text as valid and preserves it.
         strategies = ["--force-ocr"]
     else:
         # Generic "always" mode: try --redo-ocr first (preserves vectors),
@@ -656,13 +848,11 @@ def add_text_layer(
     for strategy in strategies:
         if _run_ocr(strategy):
             # Verify the PUA text is actually gone.
-            pua_fraction = detect_pua_text(pdf_path)
-            if pua_fraction < pua_threshold:
+            if detect_pua_text(pdf_path) < pua_threshold:
                 return True
-            # PUA still present — if we haven't tried --force-ocr yet, escalate.
+            # Still obfuscated — escalate to --force-ocr if not already tried.
             if strategy != "--force-ocr":
                 continue
-            # --force-ocr also failed verification — give up.
             return False
 
     return False

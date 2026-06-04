@@ -113,14 +113,16 @@ class JobManager:
             layout = "fixed-layout" if info.fixed_layout else "reflowable"
             self._complete(job, 3, f"{layout} layout detected")
 
+            # Step 4: render + rebuild text layer. The text layer is rebuilt
+            # per chunk inside render_pdf_chunked (so each OCR job stays small),
+            # which is why detection/OCR is no longer a separate step here.
             self._begin(job, 4, "Rendering PDF (this is the slow step)")
             tmp_pdf = workdir / "output.pdf"
 
-            def on_chunk_progress(current: int, total: int) -> None:
-                self._begin(job, 4,
-                            f"Rendering chunk {current}/{total}")
+            def on_progress(message: str) -> None:
+                self._begin(job, 4, message)
 
-            converter.render_pdf_chunked(
+            outcome = converter.render_pdf_chunked(
                 upload_path, tmp_pdf, info,
                 size=config.REFLOWABLE_PAGE_SIZE,
                 base_timeout=config.JOB_TIMEOUT_SEC,
@@ -128,49 +130,25 @@ class JobManager:
                 cwd=workdir,
                 chunk_size=config.CHUNK_SIZE,
                 max_retries=config.CHUNK_MAX_RETRIES,
-                progress_cb=on_chunk_progress,
+                progress_cb=on_progress,
+                ocr_mode=config.TEXT_LAYER_MODE,
+                ocr_langs=config.OCR_LANGS,
+                pua_threshold=config.PUA_THRESHOLD,
             )
-            self._complete(job, 4, "PDF rendered")
 
-            # --- Step 4.5: OCR text layer rebuild (if needed) ---
-            ocr_note = None
-            text_layer_mode = config.TEXT_LAYER_MODE
-            if text_layer_mode == "always":
-                run_ocr = True
-            elif text_layer_mode == "auto":
-                self._begin(job, 5, "Checking text layer for PUA obfuscation")
-                pua_fraction = converter.detect_pua_text(tmp_pdf)
-                run_ocr = pua_fraction >= config.PUA_THRESHOLD
-                if run_ocr:
-                    self._complete(
-                        job, 5,
-                        f"PUA detected ({pua_fraction:.0%}) — rebuilding text layer",
-                    )
-                else:
-                    self._complete(job, 5, "Text layer is clean")
+            if outcome.applied and outcome.any_failed:
+                render_msg = "PDF rendered; text layer partially rebuilt via OCR"
+            elif outcome.applied:
+                render_msg = "PDF rendered; text layer rebuilt via OCR"
+            elif outcome.any_failed:
+                render_msg = "PDF rendered; OCR failed (visual PDF is correct)"
             else:
-                run_ocr = False
+                render_msg = "PDF rendered"
+            self._complete(job, 4, render_msg)
 
-            if run_ocr:
-                self._begin(job, 6, "Rebuilding text layer via OCR")
-                ocr_reason = "pua" if text_layer_mode == "auto" else "always"
-                ocr_ok = converter.add_text_layer(
-                    tmp_pdf,
-                    langs=config.OCR_LANGS,
-                    page_direction=info.page_direction,
-                    reason=ocr_reason,
-                    pua_threshold=config.PUA_THRESHOLD,
-                )
-                if ocr_ok:
-                    ocr_note = "text layer rebuilt via OCR"
-                    self._complete(job, 6, "Text layer rebuilt")
-                else:
-                    ocr_note = "OCR attempted but failed; text layer may be unusable"
-                    self._complete(job, 6, "OCR failed (visual PDF is still correct)")
-
-            self._begin(job, 7, "Saving to library")
-            output_name = self._store(info, tmp_pdf, ocr_note=ocr_note)
-            self._complete(job, 7, "Saved")
+            self._begin(job, 5, "Saving to library")
+            output_name = self._store(info, tmp_pdf, ocr_note=outcome.note())
+            self._complete(job, 5, "Saved")
 
             self._finish(job, output_name)
         except EpubError as e:

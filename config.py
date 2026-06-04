@@ -80,8 +80,17 @@ ADAPTIVE_TIMEOUT_PER_SPINE_ITEM = int(
 # "off" = never run OCR (fastest; text layer may be PUA gibberish).
 TEXT_LAYER_MODE = os.getenv("TEXT_LAYER_MODE", "auto").lower()
 
-# Tesseract language string for OCR. Multiple languages joined with "+".
-OCR_LANGS = os.getenv("OCR_LANGS", "chi_tra+chi_sim+jpn+kor+eng+chi_tra_vert+jpn_vert")
+# Tesseract language string for OCR (joined with "+"). Only horizontal models
+# are listed here because they are installed via apt in the Dockerfile. The
+# vertical models (chi_tra_vert, jpn_vert) are added automatically for
+# vertical (rtl) books *when their data is installed* — see
+# converter.add_text_layer / resolve_ocr_langs. Any requested model that is not
+# installed is dropped at runtime rather than aborting the whole OCR pass.
+OCR_LANGS = os.getenv("OCR_LANGS", "chi_tra+chi_sim+jpn+kor+eng")
+
+# Number of parallel OCR workers (passed to ocrmypdf --jobs). Defaults to the
+# detected CPU count, capped at 4 to keep memory bounded on small containers.
+OCR_JOBS = int(os.getenv("OCR_JOBS", str(min(4, os.cpu_count() or 2))))
 
 # Fraction of extracted characters in PUA ranges that triggers OCR in "auto"
 # mode. Range 0.0–1.0; default 0.20 means if ≥20% of sampled characters are
