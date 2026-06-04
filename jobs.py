@@ -109,6 +109,11 @@ class JobManager:
             info = converter.extract_info(upload_path)
             self._complete(job, 2, f"“{info.title}”")
 
+            # Derive a focused OCR language string from the ePUB's dc:language tag
+            # (e.g. "zh-TW" → "chi_tra+eng") for better Tesseract accuracy.
+            # Falls back to the operator-configured OCR_LANGS for unknown languages.
+            ocr_langs = converter.build_ocr_langs(info.epub_language, config.OCR_LANGS)
+
             self._begin(job, 3, "Preparing Vivliostyle")
             layout = "fixed-layout" if info.fixed_layout else "reflowable"
             self._complete(job, 3, f"{layout} layout detected")
@@ -132,7 +137,7 @@ class JobManager:
                 max_retries=config.CHUNK_MAX_RETRIES,
                 progress_cb=on_progress,
                 ocr_mode=config.TEXT_LAYER_MODE,
-                ocr_langs=config.OCR_LANGS,
+                ocr_langs=ocr_langs,
                 pua_threshold=config.PUA_THRESHOLD,
             )
 

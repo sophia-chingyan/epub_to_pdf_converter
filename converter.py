@@ -65,6 +65,7 @@ class EpubInfo:
     title: str
     fixed_layout: bool = False
     page_direction: str | None = None  # "rtl" | "ltr" | None
+    epub_language: str | None = None   # raw BCP 47 tag from dc:language, e.g. "zh-TW"
     cover_bytes: bytes | None = None
     cover_ext: str | None = None
     warnings: list[str] = field(default_factory=list)
@@ -133,12 +134,14 @@ def extract_info(epub_path: Path) -> EpubInfo:
         title = _read_title(opf_root) or epub_path.stem
         fixed_layout = _read_fixed_layout(opf_root)
         page_direction = _read_page_direction(opf_root)
+        epub_language = _read_language(opf_root)
         cover_href = _find_cover_href(opf_root)
 
         info = EpubInfo(
             title=title,
             fixed_layout=fixed_layout,
             page_direction=page_direction,
+            epub_language=epub_language,
         )
 
         if cover_href:
@@ -180,6 +183,15 @@ def _read_page_direction(opf_root: ET.Element) -> str | None:
         d = spine.get("page-progression-direction")
         if d in ("rtl", "ltr"):
             return d
+    return None
+
+
+def _read_language(opf_root: ET.Element) -> str | None:
+    """Return the first dc:language value from the OPF, or None."""
+    for lang in _iter(opf_root, "language"):
+        val = (lang.text or "").strip()
+        if val:
+            return val
     return None
 
 
@@ -668,6 +680,66 @@ def resolve_ocr_langs(requested: str) -> tuple[str, list[str]]:
     usable = [code for code in requested_list if code in available]
     dropped = [code for code in requested_list if code not in available]
     return "+".join(usable), dropped
+
+
+# --- OCR language mapping ---------------------------------------------------
+
+def _map_lang_to_tesseract(tag: str) -> list[str] | None:
+    """Map a BCP 47 language tag to Tesseract horizontal language codes.
+
+    Returns a list of codes (ordered, most specific first), or None when the
+    tag is unrecognised — callers fall back to the configured lang string.
+    Vertical variants (chi_tra_vert, jpn_vert) are NOT included here; they are
+    added downstream by add_text_layer based on page_direction.
+    """
+    t = tag.lower().strip()
+    # Traditional Chinese: zh-TW, zh-HK, zh-MO, zh-Hant-*
+    if any(s in t for s in ("zh-tw", "zh-hk", "zh-mo", "zh-hant")):
+        return ["chi_tra"]
+    # Simplified Chinese: zh-CN, zh-SG, zh-Hans-*
+    if any(s in t for s in ("zh-cn", "zh-sg", "zh-hans")):
+        return ["chi_sim"]
+    # Chinese, script unspecified — include both, traditional first
+    if t.startswith("zh"):
+        return ["chi_tra", "chi_sim"]
+    # Japanese
+    if t.startswith("ja"):
+        return ["jpn"]
+    # Korean
+    if t.startswith("ko"):
+        return ["kor"]
+    # English (and other Latin-script languages covered by eng)
+    if t.startswith("en"):
+        return ["eng"]
+    return None
+
+
+def build_ocr_langs(epub_language: str | None, configured_langs: str) -> str:
+    """Build a focused Tesseract language string from the ePUB's language tag.
+
+    For a recognised language, returns a targeted string — the primary script
+    plus English (for embedded Latin text) — rather than the full configured
+    list. Tesseract is measurably more accurate with fewer languages because its
+    dictionary and N-gram models are not competing across unrelated scripts.
+
+    Example outcomes:
+      zh-TW  →  chi_tra+eng          (not chi_tra+chi_sim+jpn+kor+eng)
+      ja     →  jpn+eng
+      zh     →  chi_tra+chi_sim+eng
+
+    Falls back to *configured_langs* when the tag is absent or unrecognised, so
+    books in languages outside the mapping still OCR with the operator's chosen
+    defaults.
+    """
+    if not epub_language:
+        return configured_langs
+    primary = _map_lang_to_tesseract(epub_language)
+    if primary is None:
+        return configured_langs
+    langs = list(primary)
+    if "eng" not in langs:
+        langs.append("eng")
+    return "+".join(langs)
 
 
 # --- OCR Text Layer ---------------------------------------------------------
