@@ -259,6 +259,25 @@
         let stepStartTime = null;
         const stepDivs = {};
 
+        // Restore progress UI if a job was active before page reload
+        (function resumeActiveJob() {
+            const saved = sessionStorage.getItem('activeJob');
+            if (!saved) return;
+            try {
+                const { jobId, filename } = JSON.parse(saved);
+                if (jobId && filename) {
+                    // Show progress section immediately and start polling
+                    uploadSection.style.display = 'none';
+                    confirmSection.style.display = 'none';
+                    progressSection.style.display = 'block';
+                    convertingName.textContent = filename;
+                    pollJob(jobId);
+                }
+            } catch (e) {
+                sessionStorage.removeItem('activeJob');
+            }
+        })();
+
         dropZone.addEventListener('click', () => fileInput.click());
         dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
         dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
@@ -324,12 +343,28 @@
                 return;
             }
 
-            showActiveStep(1, totalSteps, 'Validating ePUB\u2026');
+            // Persist job info so progress survives page reload
+            sessionStorage.setItem('activeJob', JSON.stringify({ jobId, filename }));
 
+            showActiveStep(1, totalSteps, 'Validating ePUB\u2026');
+            pollJob(jobId);
+        }
+
+        function pollJob(jobId) {
             const poller = setInterval(async () => {
                 try {
                     const resp = await fetch('/job-status/' + encodeURIComponent(jobId));
                     const data = await resp.json();
+
+                    if (resp.status === 404) {
+                        // Job no longer exists (server restarted) — clean up
+                        sessionStorage.removeItem('activeJob');
+                        clearInterval(poller);
+                        stopElapsedTimer();
+                        progressSection.style.display = 'none';
+                        uploadSection.style.display = 'block';
+                        return;
+                    }
 
                     for (let i = lastRenderedSteps; i < data.steps.length; i++) {
                         const s = data.steps[i];
@@ -345,6 +380,7 @@
                             progressBar.value = totalSteps;
                             addStep('done', s.message, 'done');
                             clearInterval(poller);
+                            sessionStorage.removeItem('activeJob');
                             setTimeout(() => { window.location.reload(); }, 2000);
                             return;
                         } else {
@@ -391,6 +427,7 @@
                         stopElapsedTimer();
                         addStep('error', data.error, 'error');
                         clearInterval(poller);
+                        sessionStorage.removeItem('activeJob');
                         setTimeout(() => { uploadSection.style.display = 'block'; }, 4000);
                     }
                 } catch (err) {
