@@ -227,6 +227,7 @@ All endpoints except `/login` and `/auth` require an authenticated session (retu
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
+| `GET` | `/healthz` | — | Liveness probe for the platform health check; no disk or subprocess work |
 | `GET` | `/` | ✅ | Convert page (or login page if signed out) |
 | `GET` | `/library` | ✅ | Library page |
 | `GET` | `/login` | — | Redirect to Google OAuth authorisation URL |
@@ -393,9 +394,9 @@ All settings are read from environment variables. Copy `env.example` to `.env` a
 | `GOOGLE_CLIENT_ID` | OAuth 2.0 client ID from Google Cloud Console |
 | `GOOGLE_CLIENT_SECRET` | OAuth 2.0 client secret |
 | `ALLOWED_EMAILS` | Comma-separated list of Google emails permitted to sign in |
-| `BASE_URL` | Public URL of the deployment, e.g. `https://my-app.zeabur.app` (no trailing slash) |
+| `BASE_URL` | Public URL of the deployment, e.g. `https://my-app.up.railway.app` (no trailing slash). Falls back to `RAILWAY_PUBLIC_DOMAIN` when unset |
 | `SESSION_SECRET` | Long random string for signing session cookies |
-| `DATA_DIR` | Root directory for all persistent data (required in production; mount a persistent volume here) |
+| `DATA_DIR` | Root directory for all persistent data (required in production; mount a persistent volume here). Falls back to `RAILWAY_VOLUME_MOUNT_PATH` when unset |
 
 ### Optional
 
@@ -463,22 +464,45 @@ docker run -p 8000:8000 \
   epub-to-pdf
 ```
 
-> **Important:** Chromium headless rendering requires adequate `/dev/shm`. On some container runtimes the default (64 MB) is too small for large or fixed-layout books. Add `--shm-size=1g` (or mount a larger `/dev/shm`) if you encounter crashes.
+> **Important:** Chromium headless rendering needs more shared memory than the 64 MB `/dev/shm` most container runtimes give it, or large and fixed-layout books crash the renderer. The image therefore points `CHROMIUM_PATH` at `scripts/chromium-container.sh`, which passes `--disable-dev-shm-usage` (and `--no-sandbox`) on every launch — Vivliostyle only applies that flag by itself inside its own official image. Where the runtime allows it, `--shm-size=1g` is still worth adding; on Railway it is not configurable, which is why the flag is in the wrapper.
 
-### Zeabur
+### Railway
 
-1. Push to GitHub; create a Zeabur service from the repo (auto-detects `Dockerfile`).
-2. Mount a persistent volume at `/data`.
-3. Set the environment variables (§12).
-4. After first deploy, add the public domain's `/auth` URL as an Authorized redirect URI in Google Cloud Console.
+`railway.json` declares the Dockerfile builder, the `/healthz` health check, a
+single replica, and restart-on-failure.
+
+1. Push to GitHub; create a Railway service from the repo.
+2. Generate a domain (Settings → Networking). This sets `RAILWAY_PUBLIC_DOMAIN`,
+   which the app uses as `BASE_URL`.
+3. Attach a volume mounted at `/data`, before converting anything — without one
+   the library is wiped by every redeploy.
+4. Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `ALLOWED_EMAILS`, and
+   `SESSION_SECRET` (§12). `BASE_URL` and `DATA_DIR` derive themselves.
+5. Add the public domain's `/auth` URL as an Authorized redirect URI in Google
+   Cloud Console.
+
+The container binds `0.0.0.0:$PORT` and runs uvicorn with `--proxy-headers`, so
+the platform's injected port and TLS-terminating edge are both handled. Startup
+logs the effective `BASE_URL`/`DATA_DIR` and a `CONFIG:` warning per
+misconfiguration (see §12); the app still boots in that state, so a passing
+health check is not by itself evidence that it is configured.
+
+Single replica is a requirement, not a default: conversions are serialised
+through in-memory job state and the volume attaches to one instance.
+
+### Other platforms
+
+Any host that builds a `Dockerfile`, injects `PORT`, and can mount a volume at
+`/data` works the same way (Zeabur, Fly.io, Render, plain `docker run`). Only
+`BASE_URL` must be set by hand, since `RAILWAY_PUBLIC_DOMAIN` is Railway-specific.
 
 ### Local Development
 
-Requirements: Python 3.12+, Node.js 20+, a local Chromium/Chrome binary.
+Requirements: Python 3.12+, Node.js 22.12+, a local Chromium/Chrome binary.
 
 ```bash
 pip install -r requirements.txt
-npm install -g @vivliostyle/cli
+npm install -g @vivliostyle/cli@11.3.3   # same pin as the Dockerfile
 export $(grep -v '^#' .env | xargs)
 uvicorn app:app --reload --port 8000
 ```
