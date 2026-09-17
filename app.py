@@ -1,6 +1,7 @@
 """ePUB -> PDF converter web application.
 
 Routes:
+  GET  /healthz             Liveness probe (no auth; used by the platform)
   GET  /                    Convert page (or login page when signed out)
   GET  /library             Library page
   GET  /login               Begin Google OAuth
@@ -16,6 +17,7 @@ Routes:
 """
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 
@@ -44,6 +46,23 @@ app.add_middleware(
 
 templates = Jinja2Templates(directory="templates")
 
+log = logging.getLogger("epub2pdf")
+
+
+@app.on_event("startup")
+def _log_config() -> None:
+    """Surface deployment misconfiguration in the platform's log stream."""
+    # uvicorn configures its own loggers but leaves the root logger untouched,
+    # so without a handler here these lines would go nowhere — which is exactly
+    # where you do not want a misconfiguration warning to end up.
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(message)s")
+    log.setLevel(logging.INFO)
+
+    log.info("Serving %s with DATA_DIR=%s", config.BASE_URL, config.DATA_DIR)
+    for warning in config.startup_warnings():
+        log.warning("CONFIG: %s", warning)
+
 
 @app.on_event("startup")
 def _sweep_temp() -> None:
@@ -68,6 +87,18 @@ def _ctx(user: dict, **extra) -> dict:
         "user_picture": user.get("picture", ""),
         **extra,
     }
+
+
+# --- Health -----------------------------------------------------------------
+@app.get("/healthz")
+def healthz():
+    """Unauthenticated liveness probe for the platform health check.
+
+    Deliberately does no disk or subprocess work: it answers "the web process is
+    up and accepting requests", which is all a restart decision should hinge on.
+    A conversion running in the background must not make the app look unhealthy.
+    """
+    return JSONResponse({"status": "ok"})
 
 
 # --- Pages ------------------------------------------------------------------
