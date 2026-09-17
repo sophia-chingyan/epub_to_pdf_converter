@@ -22,16 +22,52 @@ GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 # For a single-user deployment this is just your own address.
 ALLOWED_EMAILS = _csv(os.getenv("ALLOWED_EMAILS", ""))
 
-# Public base URL of the deployment, e.g. https://my-app.zeabur.app
+
+def _platform_base_url() -> str:
+    """Public URL supplied by the hosting platform, if it exposes one.
+
+    Railway injects RAILWAY_PUBLIC_DOMAIN (e.g. "my-app-production.up.railway.app")
+    for every service that has a domain, so BASE_URL does not have to be set by
+    hand on a first deploy. An explicit BASE_URL always wins — use it when the
+    service is reached through a custom domain.
+    """
+    domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
+    if domain:
+        return f"https://{domain}"
+    # Older Railway builds expose the full URL rather than the bare domain.
+    static_url = os.getenv("RAILWAY_STATIC_URL", "").strip()
+    if static_url:
+        return static_url if "://" in static_url else f"https://{static_url}"
+    return ""
+
+
+# Public base URL of the deployment, e.g. https://my-app.up.railway.app
 # Used to build the OAuth redirect URI ({BASE_URL}/auth).
-BASE_URL = os.getenv("BASE_URL", "http://localhost:8000").rstrip("/")
+BASE_URL = (
+    os.getenv("BASE_URL", "").strip()
+    or _platform_base_url()
+    or "http://localhost:8000"
+).rstrip("/")
 
 # Secret used to sign session cookies. MUST be set to a long random value
 # in production.
-SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-insecure-change-me")
+INSECURE_SESSION_SECRET = "dev-insecure-change-me"
+SESSION_SECRET = os.getenv("SESSION_SECRET", "").strip() or INSECURE_SESSION_SECRET
+
+# Set by Railway on every deployment; used only to tailor startup warnings.
+ON_RAILWAY = bool(
+    os.getenv("RAILWAY_ENVIRONMENT_NAME") or os.getenv("RAILWAY_ENVIRONMENT")
+)
 
 # --- Storage ----------------------------------------------------------------
-DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).resolve()
+# Where uploads, scratch space, and the PDF library live. This must be a
+# persistent volume in production; on a plain container filesystem the library
+# is wiped by every redeploy. Railway exposes an attached volume's mount point
+# as RAILWAY_VOLUME_MOUNT_PATH, which is used when DATA_DIR is not set.
+VOLUME_MOUNT_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+DATA_DIR = Path(
+    os.getenv("DATA_DIR", "").strip() or VOLUME_MOUNT_PATH or "./data"
+).resolve()
 UPLOAD_DIR = DATA_DIR / "tmp" / "uploads"
 JOB_DIR = DATA_DIR / "tmp" / "jobs"
 LIBRARY_DIR = DATA_DIR / "library"
@@ -109,3 +145,56 @@ def ensure_dirs() -> None:
 
 def https_only() -> bool:
     return BASE_URL.startswith("https://")
+
+
+def startup_warnings() -> list[str]:
+    """Deployment problems worth shouting about, as human-readable lines.
+
+    These are logged at startup rather than raised: a half-configured instance
+    should still boot and serve its login page so the operator can see it came
+    up, read the log, and fix the variables.
+    """
+    warnings: list[str] = []
+
+    if SESSION_SECRET == INSECURE_SESSION_SECRET:
+        warnings.append(
+            "SESSION_SECRET is unset, so the built-in development value is in "
+            "use. Session cookies can be forged — set SESSION_SECRET to a long "
+            'random value: python -c "import secrets; print(secrets.token_hex(32))"'
+        )
+
+    if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET):
+        warnings.append(
+            "GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are unset, so Google "
+            "sign-in will fail. Nobody can use the app until they are set."
+        )
+
+    if not ALLOWED_EMAILS:
+        warnings.append(
+            "ALLOWED_EMAILS is empty, so every sign-in is denied (fail closed). "
+            "Set it to your own Google address."
+        )
+
+    if not https_only() and not BASE_URL.startswith("http://localhost"):
+        warnings.append(
+            f"BASE_URL is {BASE_URL!r}, which is not https. Google OAuth will "
+            "reject the redirect URI and session cookies will not be marked "
+            "Secure."
+        )
+
+    if VOLUME_MOUNT_PATH:
+        mount = Path(VOLUME_MOUNT_PATH).resolve()
+        if DATA_DIR != mount and mount not in DATA_DIR.parents:
+            warnings.append(
+                f"DATA_DIR ({DATA_DIR}) is outside the mounted volume ({mount}), "
+                "so the converted library will be lost on the next redeploy. "
+                f"Either set DATA_DIR={mount} or mount the volume at {DATA_DIR}."
+            )
+    elif ON_RAILWAY:
+        warnings.append(
+            f"No volume is attached, so the library in {DATA_DIR} lives on the "
+            "container filesystem and is wiped by every redeploy and restart. "
+            f"Attach a Railway volume mounted at {DATA_DIR}."
+        )
+
+    return warnings

@@ -47,7 +47,8 @@ Browser ──► FastAPI (app.py)
               ├─ Job manager (jobs.py)          one conversion at a time
               │     └─ converter.py             validate → cover → Vivliostyle
               │            └─ `vivliostyle build …`  (Node CLI → Chromium)
-              └─ Library (library.py)           PDFs + covers on disk
+              ├─ Library (library.py)           PDFs + covers on disk
+              └─ /healthz                       platform health check
 ```
 
 Storage layout under `DATA_DIR`:
@@ -87,15 +88,15 @@ temporary upload/scratch files are auto-cleaned (also swept on startup).
 
 ## 2. Environment variables
 
-Copy `.env.example` to `.env` and fill it in. Key values:
+Copy `env.example` to `.env` and fill it in. Key values:
 
 | Variable | Required | Notes |
 |---|---|---|
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | ✅ | From step 1 |
 | `ALLOWED_EMAILS` | ✅ | Comma-separated; your email |
-| `BASE_URL` | ✅ | e.g. `https://your-app.zeabur.app` (no trailing slash) |
+| `BASE_URL` | ⚠️ | e.g. `https://your-app.up.railway.app` (no trailing slash). Optional on Railway — derived from `RAILWAY_PUBLIC_DOMAIN`; required for a custom domain or another host |
 | `SESSION_SECRET` | ✅ | `python -c "import secrets; print(secrets.token_hex(32))"` |
-| `DATA_DIR` | ✅ (prod) | Point at a persistent volume |
+| `DATA_DIR` | ⚠️ | Must point at a persistent volume in production. Defaults to `/data` in the image, or to `RAILWAY_VOLUME_MOUNT_PATH` if you clear it |
 | `REFLOWABLE_PAGE_SIZE` | optional | Default `A5`. Vivliostyle presets: `A4`, `A5`, `B5`, `JIS-B5`, `letter`, etc., or a custom size like `105mm,148mm` |
 | `JOB_TIMEOUT_SEC` | optional | Default `300`. Base per-job timeout; adaptive chunk timeouts may exceed this |
 | `MAX_UPLOAD_MB` | optional | Default `100` |
@@ -106,19 +107,20 @@ Copy `.env.example` to `.env` and fill it in. Key values:
 | `ADAPTIVE_TIMEOUT_BASE` | optional | Default `60` (seconds). Fixed part of the per-chunk adaptive timeout |
 | `ADAPTIVE_TIMEOUT_PER_SPINE_ITEM` | optional | Default `10` (seconds per spine item). Variable part of the per-chunk adaptive timeout |
 | `TEXT_LAYER_MODE` | optional | Default `auto`. When to run OCR: `auto` (PUA-obfuscated books only), `always`, or `off` |
-| `OCR_LANGS` | optional | Default `chi_tra+chi_sim+jpn+kor+eng`. Tesseract languages for OCR |
+| `OCR_LANGS` | optional | Default `chi_tra+chi_sim+jpn+kor+eng`. Tesseract languages for OCR. The vertical models are installed and added automatically for vertical-text books |
+| `OCR_JOBS` | optional | Default: CPU count capped at `4`. Parallel OCR workers. Lower it to `1` on a memory-constrained instance |
 | `PUA_THRESHOLD` | optional | Default `0.20`. Fraction of PUA chars to trigger OCR in auto mode |
-| `CHROMIUM_PATH` | optional | Default `/usr/bin/chromium`. Path to the Chromium/Chrome binary used by Vivliostyle |
+| `CHROMIUM_PATH` | optional | Browser binary used by Vivliostyle. The image sets it to `/usr/local/bin/chromium-container`, a wrapper that adds the container-safe Chromium flags; point it at a real browser only for local development |
 
 ---
 
 ## 3. Local development
 
-Requires Python 3.12+, Node.js 20+, and a Chromium/Chrome binary.
+Requires Python 3.12+, Node.js 22.12+, and a Chromium/Chrome binary.
 
 ```bash
 pip install -r requirements.txt
-npm install -g @vivliostyle/cli
+npm install -g @vivliostyle/cli@11.3.3   # same pin as the Dockerfile
 
 # point CHROMIUM_PATH at your local browser, e.g. on macOS:
 #   export CHROMIUM_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
@@ -130,21 +132,70 @@ Open http://localhost:8000.
 
 ---
 
-## 4. Deploy on Zeabur
+## 4. Deploy on Railway
 
-This repo ships a `Dockerfile` that installs Python, Node 20, system Chromium,
-and the Noto CJK fonts.
+This repo ships a `Dockerfile` (Python, Node 22, system Chromium, Noto CJK
+fonts, Tesseract) and a `railway.json` that tells Railway to build it, health
+check `/healthz`, and run exactly one replica.
 
-1. Push the repo to GitHub (or use Zeabur's Git deploy).
-2. In Zeabur, create a service from the repo — it will detect the `Dockerfile`.
-3. Add a **persistent volume** mounted at `/data` so your library survives
-   restarts and redeploys.
-4. Set the environment variables from section 2 (especially `BASE_URL` =
-   your Zeabur public domain, and the OAuth values).
-5. Deploy. Once it's up, register that public domain's `/auth` URL as an
-   Authorized redirect URI in Google Cloud (section 1, step 4).
+1. Push the repo to GitHub.
+2. In Railway: **New Project → Deploy from GitHub repo** and pick this repo.
+   Railway reads `railway.json`, so the Dockerfile builder and health check are
+   configured for you. The first build takes a while — it installs Chromium,
+   Node, and the CJK OCR models.
+3. **Settings → Networking → Generate Domain**. This both gives you a URL and
+   sets `RAILWAY_PUBLIC_DOMAIN`, which the app uses as `BASE_URL` — so you do
+   not have to know the domain in advance.
+4. **Attach a volume**: *service → Data / Volumes → Add Volume*, mount path
+   `/data`. **Do this before you convert anything.** Without a volume the
+   library lives on the container filesystem and every redeploy wipes it.
+5. **Variables** — set these (see section 2 for the full list):
 
-The container listens on `$PORT` (default 8000); Zeabur sets this automatically.
+   | Variable | Value |
+   |---|---|
+   | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | from step 1 |
+   | `ALLOWED_EMAILS` | your Google address |
+   | `SESSION_SECRET` | `python -c "import secrets; print(secrets.token_hex(32))"` |
+
+   `BASE_URL` and `DATA_DIR` are left unset on purpose: the generated domain and
+   the `/data` mount are picked up automatically. Set `BASE_URL` explicitly only
+   when you add a custom domain.
+6. In Google Cloud, add `https://YOUR-DOMAIN/auth` as an Authorized redirect URI
+   (section 1, step 4), then redeploy or just sign in.
+
+Railway sets `PORT` and terminates TLS at its edge; the container binds
+`0.0.0.0:$PORT` and runs uvicorn with `--proxy-headers`, so both are handled.
+
+**Check the deploy logs after the first boot.** The app logs its effective
+`BASE_URL` and `DATA_DIR`, and prints a `CONFIG:` warning for each thing that
+will bite you later — a default `SESSION_SECRET`, missing OAuth credentials, an
+empty allowlist, or a library directory that is not on the volume. The app still
+boots and serves its login page in that state, so a healthy deploy is not by
+itself proof that it is configured.
+
+### Sizing and cost
+
+Conversions are CPU- and memory-hungry (headless Chromium, plus Tesseract when a
+book needs OCR). A book that renders fine on a laptop can OOM on a small
+instance, which shows up as a conversion that fails with a Chromium error rather
+than as a crash. If that happens, give the service more memory, or lower
+`CHUNK_SIZE` (say `20`) and `OCR_JOBS` (say `1`) to shrink the peak.
+
+Because conversions are serialised in memory and the volume attaches to a single
+instance, keep `numReplicas` at 1. Leave `sleepApplication` off as well: a
+sleeping instance would be suspended mid-conversion.
+
+### Other platforms
+
+Any host that builds a Dockerfile, injects `PORT`, and can mount a volume at
+`/data` works the same way — Zeabur, Fly.io, Render, or plain `docker run`. Only
+`BASE_URL` needs setting by hand there, since `RAILWAY_PUBLIC_DOMAIN` is
+Railway-specific.
+
+```bash
+docker build -t epub2pdf .
+docker run --rm -p 8000:8000 --env-file .env -v epub-data:/data epub2pdf
+```
 
 ---
 
@@ -159,12 +210,14 @@ Your email isn't in `ALLOWED_EMAILS`, or the consent screen is in Testing mode
 and you haven't added yourself as a test user.
 
 **Rendering fails or hangs on large books (Chromium / `/dev/shm`).**
-Headless Chromium uses shared memory (`/dev/shm`), which defaults to a small
-size in containers and can cause crashes on big/fixed-layout books. If you hit
-this, increase the container's shared memory (e.g. a larger `shm-size`, or a
-`/dev/shm` mount with more space) and/or raise `JOB_TIMEOUT_SEC`. Chunked
-rendering (controlled by `CHUNK_SIZE`) already helps here; reducing `CHUNK_SIZE`
-further (e.g. `20`) gives each chunk less work to do per Chromium invocation.
+Headless Chromium puts large buffers in `/dev/shm`, which is 64 MB in most
+container runtimes and cannot be resized on Railway. The image therefore
+launches Chromium through `scripts/chromium-container.sh`, which passes
+`--disable-dev-shm-usage` so those buffers go to `/tmp` instead. If a big or
+fixed-layout book still fails, raise `JOB_TIMEOUT_SEC` and/or lower `CHUNK_SIZE`
+(e.g. `20`) so each Chromium invocation does less work. Note that this only
+applies when `CHROMIUM_PATH` points at that wrapper — if you override it with a
+raw browser path, you lose the flag.
 
 **A chunk fails and the whole job aborts.**
 The app retries each chunk up to `CHUNK_MAX_RETRIES` times with exponential
@@ -178,9 +231,25 @@ its own fonts they're used first. If you still see tofu, confirm the font
 packages installed during the image build.
 
 **Vivliostyle version issues.**
-The Dockerfile installs the latest `@vivliostyle/cli` at build time. For
-reproducible builds, pin a version (e.g. `@vivliostyle/cli@9.x`) once you've
-confirmed it renders your books. Requires Node ≥ 20.
+The Dockerfile pins `@vivliostyle/cli` via the `VIVLIOSTYLE_VERSION` build
+argument (and Node via `NODE_MAJOR`), so every rebuild renders like the deploy
+you tested. Previously the image installed whatever was latest at build time,
+which meant a redeploy months later could silently cross a major version — and
+because npm resolves the newest release the image's Node supports, the version
+you got also drifted with the base image's Node minor. Bump the two pins
+together: Vivliostyle 11.0.1+ requires Node ≥ 22.12. On Railway you can override
+either as a service variable instead of editing the Dockerfile.
+
+**The deploy is stuck on "waiting for health check".**
+Railway polls `/healthz`, which answers as soon as the web process is up and
+never touches disk or a subprocess. If it never turns green the app failed to
+start — read the deploy logs for the traceback. A conversion running in the
+background does not affect it.
+
+**The library is empty after a redeploy.**
+No volume was attached, so `/data` was part of the container filesystem. Attach
+one at `/data` (section 4, step 4); converted PDFs from before that are gone.
+The startup log warns about this on every boot.
 
 **Wrong page size for novels.**
 Reflowable books use `REFLOWABLE_PAGE_SIZE` (default `A5`). For a pocket-novel
@@ -200,8 +269,10 @@ probably doesn't set `vertical-rl`.
 - Job progress is in memory — a restart mid-conversion loses that job (never the
   library).
 - Chromium runs with its sandbox disabled (the Vivliostyle CLI default, and the
-  norm for headless rendering in containers). Acceptable for a private,
-  single-user tool; if you prefer, run the container as a non-root user.
+  norm for headless rendering in containers); the image's launcher wrapper
+  passes `--no-sandbox` explicitly so this does not depend on that default.
+  Acceptable for a private, single-user tool that only renders books you upload
+  yourself; if you prefer, run the container as a non-root user.
 - Vivliostyle is AGPLv3. Running it as a private single-user tool does not
   trigger the network-distribution clause.
 - **PUA-obfuscated text**: Some commercial CJK ePUBs encode text in Unicode
@@ -211,7 +282,8 @@ probably doesn't set `vertical-rl`.
   via OCR" note is stored in the book's metadata. Caveats:
   - OCR may introduce occasional character errors vs. the publisher's exact text.
   - Vertical-text pages benefit from Tesseract vertical models (`chi_tra_vert`,
-    `jpn_vert`) — add them to `OCR_LANGS` if installed.
+    `jpn_vert`); the image installs them and the app adds them automatically for
+    vertical books.
   - OCR adds processing time; the `auto` mode only pays this cost for obfuscated
     books.
 - **Chunked rendering limitations**: When a book is large enough to be split into
