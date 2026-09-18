@@ -1,4 +1,4 @@
-"""ePUB -> PDF converter web application.
+"""ePUB <-> PDF converter web application.
 
 Routes:
   GET  /healthz             Liveness probe (no auth; used by the platform)
@@ -7,10 +7,10 @@ Routes:
   GET  /login               Begin Google OAuth
   GET  /auth                OAuth callback
   GET  /logout              Clear session
-  POST /upload              Receive an .epub, return its stored name
-  POST /start-convert/{f}   Start a conversion job
+  POST /upload              Receive an .epub or .pdf, return its stored name
+  POST /start-convert/{f}   Start a conversion job (direction from extension)
   GET  /job-status/{id}     Poll job progress
-  GET  /download/{name}     Download a converted PDF
+  GET  /download/{name}     Download a converted PDF or ePUB
   GET  /cover/{name}        Serve a cover thumbnail
   POST /delete/{name}       Delete one book
   POST /delete-all          Delete all books
@@ -36,7 +36,9 @@ from jobs import manager
 
 config.ensure_dirs()
 
-app = FastAPI(title="ePUB to PDF Converter")
+app = FastAPI(title="ePUB / PDF Converter")
+
+UPLOAD_EXTENSIONS = (".epub", ".pdf")
 app.add_middleware(
     SessionMiddleware,
     secret_key=config.SESSION_SECRET,
@@ -159,12 +161,13 @@ async def upload(request: Request, file: UploadFile = File(...)):
         return JSONResponse({"error": "Not signed in."}, status_code=401)
 
     orig = file.filename or "book.epub"
-    if not orig.lower().endswith(".epub"):
-        return JSONResponse({"error": "Please upload an .epub file."}, status_code=400)
+    ext = Path(orig).suffix.lower()
+    if ext not in UPLOAD_EXTENSIONS:
+        return JSONResponse({"error": "Please upload an .epub or .pdf file."}, status_code=400)
 
     safe = converter.safe_filename(orig)
-    if not safe.lower().endswith(".epub"):
-        safe += ".epub"
+    if not safe.lower().endswith(ext):
+        safe += ext
     dest = config.UPLOAD_DIR / safe
 
     size = 0
@@ -219,10 +222,10 @@ def job_status(request: Request, job_id: str):
 def download(request: Request, name: str):
     if not current_user(request):
         return JSONResponse({"error": "Not signed in."}, status_code=401)
-    p = library.pdf_path(name)
+    p = library.book_path(name)
     if not p:
         return JSONResponse({"error": "Not found."}, status_code=404)
-    return FileResponse(p, media_type="application/pdf", filename=p.name)
+    return FileResponse(p, media_type=library.media_type(p), filename=p.name)
 
 
 @app.get("/cover/{name}")

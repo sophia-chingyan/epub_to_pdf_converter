@@ -1,9 +1,9 @@
-"""Filesystem-backed library of converted PDFs.
+"""Filesystem-backed library of converted books.
 
 Each book in the library consists of:
-  <stem>.pdf            the converted PDF
-  <stem>.meta.json      sidecar metadata (title, cover filename, ...)
-  <stem>.cover.<ext>    optional cover thumbnail
+  <stem>.pdf | <stem>.epub   the converted file
+  <stem>.meta.json           sidecar metadata (title, cover filename, ...)
+  <stem>.cover.<ext>         optional cover thumbnail
 """
 from __future__ import annotations
 
@@ -11,6 +11,9 @@ import json
 from pathlib import Path
 
 import config
+
+BOOK_EXTENSIONS = (".pdf", ".epub")
+MEDIA_TYPES = {".pdf": "application/pdf", ".epub": "application/epub+zip"}
 
 
 def human_size(num: int) -> str:
@@ -35,27 +38,31 @@ def _safe_member(name: str) -> Path | None:
     return p
 
 
+def _book_files() -> list[Path]:
+    files: list[Path] = []
+    for ext in BOOK_EXTENSIONS:
+        files.extend(config.LIBRARY_DIR.glob(f"*{ext}"))
+    return files
+
+
 def list_books(limit: int | None = None) -> list[dict]:
     """Return books newest-first in the shape the templates expect."""
     config.ensure_dirs()
-    pdfs = sorted(
-        config.LIBRARY_DIR.glob("*.pdf"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
+    files = sorted(_book_files(), key=lambda p: p.stat().st_mtime, reverse=True)
     if limit is not None:
-        pdfs = pdfs[:limit]
+        files = files[:limit]
 
     books: list[dict] = []
-    for pdf in pdfs:
-        base = pdf.name[:-4]
-        title, cover = pdf.stem, None
+    for f in files:
+        base = f.name[: -len(f.suffix)]
+        title, cover, note = f.stem, None, None
         meta_path = config.LIBRARY_DIR / f"{base}.meta.json"
         if meta_path.exists():
             try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
                 title = meta.get("title") or title
                 cover = meta.get("cover")
+                note = meta.get("ocr_note")
             except Exception:
                 pass
         if cover and not (config.LIBRARY_DIR / cover).exists():
@@ -63,10 +70,11 @@ def list_books(limit: int | None = None) -> list[dict]:
         books.append({
             "stem": title,
             "cover": cover,
+            "note": note,
             "files": [{
-                "name": pdf.name,
-                "ext": "PDF",
-                "size": human_size(pdf.stat().st_size),
+                "name": f.name,
+                "ext": f.suffix.lstrip(".").upper(),
+                "size": human_size(f.stat().st_size),
             }],
         })
     return books
@@ -82,19 +90,29 @@ def cover_path(name: str) -> Path | None:
     return None
 
 
-def pdf_path(name: str) -> Path | None:
+def book_path(name: str) -> Path | None:
+    """Path of a converted book (PDF or ePUB) by file name, or None."""
     p = _safe_member(name)
-    if p and p.suffix.lower() == ".pdf" and p.exists():
+    if p and p.suffix.lower() in BOOK_EXTENSIONS and p.exists():
         return p
     return None
 
 
-def delete_book(pdf_name: str) -> bool:
-    """Delete a PDF and its sidecar/cover. Returns True if the PDF existed."""
-    p = pdf_path(pdf_name)
+def pdf_path(name: str) -> Path | None:
+    p = book_path(name)
+    return p if p and p.suffix.lower() == ".pdf" else None
+
+
+def media_type(path: Path) -> str:
+    return MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
+
+
+def delete_book(name: str) -> bool:
+    """Delete a book and its sidecar/cover. Returns True if the file existed."""
+    p = book_path(name)
     if not p:
         return False
-    base = p.name[:-4]
+    base = p.name[: -len(p.suffix)]
     p.unlink(missing_ok=True)
     (config.LIBRARY_DIR / f"{base}.meta.json").unlink(missing_ok=True)
     for cover in config.LIBRARY_DIR.glob(f"{base}.cover.*"):
@@ -104,7 +122,7 @@ def delete_book(pdf_name: str) -> bool:
 
 def delete_all() -> list[str]:
     deleted = []
-    for pdf in list(config.LIBRARY_DIR.glob("*.pdf")):
-        if delete_book(pdf.name):
-            deleted.append(pdf.name)
+    for f in list(_book_files()):
+        if delete_book(f.name):
+            deleted.append(f.name)
     return deleted

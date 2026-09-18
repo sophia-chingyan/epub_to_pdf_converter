@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Library — ePUB → PDF Converter</title>
+    <title>Library — ePUB ⇄ PDF Converter</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;600&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
@@ -210,6 +210,7 @@
 
         .badge { display: inline-block; padding: 0.15rem 0.55rem; border-radius: 4px; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em; }
         .badge-pdf { background: #fde8ec; color: #be185d; }
+        .badge-epub { background: #dcfce7; color: #166534; }
 
         .file-size { font-size: 0.85rem; color: var(--text-muted); }
 
@@ -249,7 +250,7 @@
 <body>
 
     <header class="site-header">
-        <a href="/" class="brand">ePUB<span>&rarr;</span>PDF</a>
+        <a href="/" class="brand">ePUB<span>&#8646;</span>PDF</a>
         <nav class="header-nav">
             <a href="/" class="nav-link">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
@@ -289,7 +290,7 @@
         <div class="empty-state">
             <div class="empty-icon">📚</div>
             <h2>No books yet</h2>
-            <p>Convert an ePUB file to get started. Your PDFs will appear here.</p>
+            <p>Convert an ePUB or PDF file to get started. Your converted books will appear here.</p>
             <a href="/" class="btn btn-primary">Convert a file</a>
         </div>
         {% else %}
@@ -340,7 +341,7 @@
                                 </div>
                             </div>
                         </td>
-                        <td><span class="badge badge-pdf">{{ f.ext }}</span></td>
+                        <td><span class="badge badge-{{ f.ext|lower }}">{{ f.ext }}</span></td>
                         <td><span class="file-size">{{ f.size }}</span></td>
                         <td>
                             <div class="row-actions">
