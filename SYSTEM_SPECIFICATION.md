@@ -1,7 +1,7 @@
-# System Specification — ePUB → PDF Converter
+# System Specification — ePUB ⇄ PDF Converter
 
-**Version:** 1.0  
-**Last updated:** 2026-05-31  
+**Version:** 1.1  
+**Last updated:** 2026-09-18  
 **Repository:** `sophia-chingyan/epub_to_pdf_converter`
 
 ---
@@ -29,12 +29,13 @@
 
 ## 1. Purpose and Scope
 
-This application is a **private, single-user web service** that converts ePUB e-books into PDF documents with high fidelity. It is designed for personal use and is restricted to a configurable email allowlist via Google OAuth.
+This application is a **private, single-user web service** that converts ePUB e-books into PDF documents, and PDF documents into reflowable ePUB e-books, with high fidelity. It is designed for personal use and is restricted to a configurable email allowlist via Google OAuth.
 
 ### Primary Goals
 
 - Convert reflowable and fixed-layout ePUBs to PDF.
-- Preserve document structure: images, hyperlinks, paragraph styles, table of contents (as PDF bookmarks), and vertical/horizontal CJK typesetting.
+- Convert PDFs (born-digital, and scanned or PUA-obfuscated ones via OCR) to reflowable EPUB 3.
+- Preserve document structure in both directions: images, hyperlinks, paragraph styles, table of contents (PDF bookmarks ⇄ ePUB navigation), and vertical/horizontal CJK typesetting (including ruby/furigana).
 - Provide first-class support for **CJK scripts** (Traditional/Simplified Chinese, Japanese with ruby/furigana, Korean) and English.
 - Handle very large books reliably through chunked, retried rendering.
 - Offer a simple browser-based UI with drag-and-drop upload, live progress display, and a persistent library of converted PDFs.
@@ -43,7 +44,8 @@ This application is a **private, single-user web service** that converts ePUB e-
 
 - Multi-user tenancy or per-user libraries.
 - Stripping or circumventing DRM (DRM-protected files are detected and rejected).
-- Conversion from formats other than ePUB.
+- Conversion from formats other than ePUB and PDF.
+- Reproducing a PDF's exact page layout in the ePUB (the ePUB is reflowable by design; fonts are not embedded).
 
 ---
 
@@ -135,6 +137,7 @@ Browser
 | `httpx>=0.27` | Async HTTP client (required by Authlib) |
 | `pillow>=10.2` | Cover image decoding and thumbnail generation |
 | `pypdf>=4.0` | Merging per-chunk PDFs into a single output PDF |
+| `pymupdf>=1.24` | PDF → ePUB: text/glyph geometry, images, links, bookmarks, tables, page rendering |
 
 ### Front-End
 
@@ -181,34 +184,48 @@ Responsibilities:
 - **Retry logic** (`_render_with_retry`) — exponential back-off retry with non-retryable error detection.
 - **Filename sanitisation** (`safe_filename`) — strips unsafe characters, preserves Unicode word characters (including CJK), limits to 180 chars.
 
+### `pdf2epub.py` — PDF inspection and ePUB building
+
+The PDF → ePUB counterpart of `converter.py`, built on PyMuPDF (no subprocesses except the optional OCR pre-pass, which reuses `converter.add_text_layer` / ocrmypdf).
+
+Responsibilities:
+- **Validation** (`validate`) — `%PDF` header, openable, not password-protected, at least one page.
+- **Metadata & cover** (`extract_info`, `cover_image`) — title/author from the document info (file-name-like titles are discarded), language from the catalog `/Lang`; the cover is page 1's own full-page image when it has one, else a render of page 1.
+- **Analysis pass** (`analyze`) — one cheap pass over all pages: writing mode (vertical vs. horizontal, by glyph geometry), script statistics → language guess (`ScriptStats`), body font size (character-weighted mode), heading size ladder, running header/footer signatures (repeated text, or a repeated slot with small/short text), text coverage (scanned detection) and PUA fraction.
+- **OCR pre-pass** (`prepare_text_layer`) — with `PDF_OCR_MODE=auto`: `ocrmypdf --skip-text` for scanned PDFs, `--force-ocr` (via `converter.add_text_layer`) for PUA-obfuscated ones; the upload is modified in place and re-analysed.
+- **Page → units** (`page_units`) — glyphs are grouped into *runs* (a horizontal line, or a vertical column — both `WMode 1` fonts and Chromium-style stacked one-glyph lines are recognised), lines MuPDF split at wide justified gaps are re-joined, page-wide column gutters are detected and lines split there, ruby runs (small kana/bopomofo beside a larger run) are folded into their base glyphs, link annotations tag glyphs (with a nearest-column fallback for Chromium's misplaced vertical-text link rectangles), ruled tables become `<table>` units, vector-drawing clusters without text are rasterised, images are extracted by xref (soft masks folded into PNG; identical images stored once), running heads/page numbers are dropped, and units are ordered by a recursive XY-cut that prefers the widest empty stripe (so column gutters beat inter-line gaps and full-width headings force a top/bottom split first).
+- **Units → paragraphs** (`Builder`) — headings from font size (or the bookmark level when the unit is a bookmark target), paragraph continuation across units and pages (indent / full-line / spacing / CJK dialogue-opener cues), alignment classes, `<small>` text, chapter files split at level-1 bookmarks (or h1 without bookmarks) and at a soft size cap; page anchors and bookmark anchors are recorded for link and navigation resolution.
+- **Packaging** (`write_epub`) — EPUB 3 zip: stored `mimetype` first, `container.xml`, OPF (language, `dcterms:modified`, cover, `primary-writing-mode`, `page-progression-direction="rtl"` for vertical books), `nav.xhtml` (nested from bookmarks, else from headings), EPUB 2 `toc.ncx`, `styles.css` (vertical-rl rules when needed, indent policy voted from the document), cover page, chapter XHTML files, images.
+
 ### `jobs.py` — Job management
 
-Implements a single-slot, in-memory job queue (`JobManager`) backed by a `threading.Lock` and a daemon thread.
+Implements a single-slot, in-memory job queue (`JobManager`) backed by a `threading.Lock` and a daemon thread. The pipeline is chosen by the upload's extension (`.epub` → `_run_epub_to_pdf`, `.pdf` → `_run_pdf_to_epub`); both report five steps.
 
-`Job` dataclass fields: `id`, `display_name`, `status` (`running`|`done`|`error`), `current_step`, `current_label`, `steps` (completed step log), `error`, `output_name`.
+`Job` dataclass fields: `id`, `display_name`, `status` (`running`|`done`|`error`), `current_step`, `current_label`, `steps` (completed step log), `error`, `output_name`, `direction` (`epub-to-pdf`|`pdf-to-epub`).
 
 `JobManager` exposes:
 - `start(upload_path, display_name)` — creates a job, starts the worker thread, returns `job_id`.
 - `get(job_id)` — thread-safe job lookup.
 - `is_busy()` — returns `True` if a job with `status == "running"` exists.
 
-After a successful conversion the PDF, cover thumbnail, and `.meta.json` sidecar are moved from the job workdir into the library. The workdir and the upload file are always cleaned up in the `finally` block.
+After a successful conversion the output file, cover thumbnail, and `.meta.json` sidecar are moved from the job workdir into the library. The workdir and the upload file are always cleaned up in the `finally` block.
 
-### `library.py` — PDF library
+### `library.py` — Book library
 
 Reads and writes the permanent library directory. Each book is represented by three files with a shared stem:
 
 | File | Contents |
 |---|---|
-| `<stem>-epub-to-pdf.pdf` | Converted PDF |
-| `<stem>-epub-to-pdf.cover.<ext>` | Cover thumbnail (optional) |
-| `<stem>-epub-to-pdf.meta.json` | JSON sidecar: `title`, `pdf`, `cover`, `fixed_layout` |
+| `<stem>-epub-to-pdf.pdf` or `<stem>-pdf-to-epub.epub` | Converted book |
+| `<stem>-….cover.<ext>` | Cover thumbnail (optional) |
+| `<stem>-….meta.json` | JSON sidecar: `title`, `file`, `format` (`PDF`/`EPUB`), `cover`, optional `ocr_note`; plus `fixed_layout` (+ legacy `pdf`) for PDFs, `language`, `vertical`, `pages` for ePUBs |
 
 Key functions:
-- `list_books(limit)` — returns books sorted newest-first; reads sidecar for title and cover filename.
-- `pdf_path(name)` / `cover_path(name)` — resolve a filename to a safe absolute path, refusing directory traversal.
-- `delete_book(pdf_name)` — deletes the PDF, sidecar, and all cover files matching the stem.
-- `delete_all()` — iterates all PDFs and calls `delete_book`.
+- `list_books(limit)` — returns books (PDF and ePUB) sorted newest-first; reads sidecar for title, cover filename and note.
+- `book_path(name)` / `pdf_path(name)` / `cover_path(name)` — resolve a filename to a safe absolute path, refusing directory traversal.
+- `media_type(path)` — `application/pdf` or `application/epub+zip` for downloads.
+- `delete_book(name)` — deletes the book, sidecar, and all cover files matching the stem.
+- `delete_all()` — iterates all books and calls `delete_book`.
 
 ### `templates/` — Jinja2 HTML templates
 
@@ -233,17 +250,17 @@ All endpoints except `/login` and `/auth` require an authenticated session (retu
 | `GET` | `/login` | — | Redirect to Google OAuth authorisation URL |
 | `GET` | `/auth` | — | OAuth callback; validates token, checks allowlist, sets session |
 | `GET` | `/logout` | — | Clears session, redirects to `/` |
-| `POST` | `/upload` | ✅ | Stream-upload an `.epub`; returns `{"filename": "<safe_name>"}` |
-| `POST` | `/start-convert/{filename}` | ✅ | Start a conversion job; returns `{"job_id": "<hex>"}` |
+| `POST` | `/upload` | ✅ | Stream-upload an `.epub` or `.pdf`; returns `{"filename": "<safe_name>"}` |
+| `POST` | `/start-convert/{filename}` | ✅ | Start a conversion job (direction from the extension); returns `{"job_id": "<hex>"}` |
 | `GET` | `/job-status/{job_id}` | ✅ | Poll job progress; returns `Job.to_dict()` |
-| `GET` | `/download/{name}` | ✅ | Download a converted PDF |
+| `GET` | `/download/{name}` | ✅ | Download a converted PDF or ePUB (media type by extension) |
 | `GET` | `/cover/{name}` | ✅ | Serve a cover thumbnail |
 | `POST` | `/delete/{name}` | ✅ | Delete one book (PDF + sidecar + cover) |
 | `POST` | `/delete-all` | ✅ | Delete all books; returns list of deleted filenames |
 
 ### Upload constraints
 
-- Accepts only `.epub` files (checked by extension on the server).
+- Accepts only `.epub` and `.pdf` files (checked by extension on the server); the extension selects the pipeline.
 - Maximum file size: `MAX_UPLOAD_MB` (default 100 MB), enforced per-chunk during streaming (file is discarded and `400` is returned if exceeded).
 
 ### Job status response schema
@@ -259,11 +276,12 @@ All endpoints except `/login` and `/auth` require an authenticated session (retu
     {"step": 3, "message": "reflowable layout detected"}
   ],
   "error": "",
-  "output_name": null
+  "output_name": null,
+  "direction": "epub-to-pdf | pdf-to-epub"
 }
 ```
 
-When `status` is `"done"`, `output_name` holds the PDF filename for use with `/download/{name}`.
+When `status` is `"done"`, `output_name` holds the output filename (PDF or ePUB) for use with `/download/{name}`.
 
 ---
 
@@ -289,7 +307,9 @@ Sessions use Starlette's `SessionMiddleware` with a signed (HMAC) cookie backed 
 
 ## 8. Conversion Pipeline
 
-Each job runs the following pipeline in a background daemon thread:
+### 8.0 ePUB → PDF
+
+Each `.epub` job runs the following pipeline in a background daemon thread:
 
 | Step | Label | Action |
 |---|---|---|
@@ -302,6 +322,20 @@ Each job runs the following pipeline in a background daemon thread:
 | 7 | Saving to library | `jobs.JobManager._store()` — moves PDF + cover + sidecar to `LIBRARY_DIR` |
 
 Steps 5–6 are conditional: in `auto` mode (default) they only run when PUA obfuscation is detected; in `always` mode OCR always runs; in `off` mode they are skipped entirely.
+
+### 8.0b PDF → ePUB
+
+Each `.pdf` job runs this pipeline (same five UI steps):
+
+| Step | Label | Action |
+|---|---|---|
+| 1 | Validating PDF | `pdf2epub.validate()` — `%PDF` header, openable, not password-protected |
+| 2 | Extracting metadata & cover | `pdf2epub.extract_info()` — title, author, `/Lang`, page count, cover thumbnail |
+| 3 | Analysing layout | `pdf2epub.analyze()` — writing mode, language, body size, heading ladder, running heads; then `prepare_text_layer()` runs OCR for scanned / PUA-obfuscated PDFs when `PDF_OCR_MODE=auto` (progress shown in the same step) |
+| 4 | Building ePUB | `pdf2epub.convert()` — page-by-page unit extraction, paragraph assembly, EPUB packaging; progress reports the page number |
+| 5 | Saving to library | `jobs.JobManager._store()` — moves ePUB + cover + sidecar to `LIBRARY_DIR` |
+
+Vertical text is decided per document by majority of glyphs: a vertical book gets `writing-mode: vertical-rl`, `page-progression-direction="rtl"` and the `primary-writing-mode` meta; its columns are re-joined into paragraphs in right-to-left order. Headers, footers and page numbers are removed by repetition across pages (text signature with digits collapsed, or a repeated slot with small/short text). The language is the catalog `/Lang` refined by script statistics (`zh` → `zh-TW`/`zh-CN`; an implausible `en` on a CJK book is overridden).
 
 ### 8.1 Chunked Rendering
 
@@ -353,7 +387,7 @@ The singleton `manager = JobManager()` is instantiated at module import time and
 
 ## 10. Library Management
 
-Books are stored in `LIBRARY_DIR` as a flat directory of file triplets sharing a common stem. The stem is derived from the book title run through `safe_filename()` with a `-epub-to-pdf` suffix appended, and made unique by appending ` (2)`, ` (3)`, … if a collision exists.
+Books are stored in `LIBRARY_DIR` as a flat directory of file triplets sharing a common stem. The stem is derived from the book title run through `safe_filename()` with a `-epub-to-pdf` (PDF output) or `-pdf-to-epub` (ePUB output) suffix appended, and made unique by appending ` (2)`, ` (3)`, … if a collision exists.
 
 All library file access goes through `_safe_member()`, which:
 1. Strips any directory component from the supplied filename.
@@ -368,13 +402,16 @@ All library file access goes through `_safe_member()`, which:
 ```
 $DATA_DIR/               (default: ./data — override with DATA_DIR env var)
 ├── tmp/
-│   ├── uploads/         Uploaded .epub files (one per pending job; deleted after job ends)
+│   ├── uploads/         Uploaded .epub / .pdf files (one per pending job; deleted after job ends)
 │   └── jobs/
 │       └── <job_id>/    Per-job scratch directory (chunk EPUBs, chunk PDFs; deleted after job ends)
 └── library/
     ├── <stem>-epub-to-pdf.pdf
     ├── <stem>-epub-to-pdf.cover.jpg    (optional)
-    └── <stem>-epub-to-pdf.meta.json
+    ├── <stem>-epub-to-pdf.meta.json
+    ├── <stem>-pdf-to-epub.epub
+    ├── <stem>-pdf-to-epub.cover.jpg    (optional)
+    └── <stem>-pdf-to-epub.meta.json
 ```
 
 - `tmp/` is swept on application startup (removes orphans from crashes).
@@ -415,6 +452,9 @@ All settings are read from environment variables. Copy `env.example` to `.env` a
 | `TEXT_LAYER_MODE` | `auto` | When to run OCR: `auto` (only PUA-obfuscated books), `always`, or `off` |
 | `OCR_LANGS` | `chi_tra+chi_sim+jpn+kor+eng` | Tesseract language string for OCR |
 | `PUA_THRESHOLD` | `0.20` | Fraction of PUA characters to trigger OCR in `auto` mode (0.0–1.0) |
+| `PDF_OCR_MODE` | `auto` | PDF → ePUB: `auto` repairs scanned / PUA-obfuscated PDFs with OCR before extraction; `off` converts the existing text layer as is |
+| `PDF_TABLES` | `1` | PDF → ePUB: detect ruled tables and emit `<table>` (horizontal text only) |
+| `PDF_DRAWINGS` | `1` | PDF → ePUB: rasterise vector drawings (charts, diagrams) as PNG figures |
 
 ---
 
@@ -517,8 +557,9 @@ uvicorn app:app --reload --port 8000
 | Authorisation | Email allowlist; fails closed (empty list → deny all) |
 | Session integrity | HMAC-signed cookies (`itsdangerous`); `https_only=True` on HTTPS deployments |
 | File path traversal | `_safe_member()` in `library.py` strips directory components and verifies the resolved path is under `LIBRARY_DIR` |
-| Upload validation | Extension check (`.epub` only); size limit enforced during streaming |
-| DRM detection | `encryption.xml` is parsed; any non-font-obfuscation algorithm causes rejection |
+| Upload validation | Extension check (`.epub` / `.pdf` only); size limit enforced during streaming |
+| DRM detection | ePUB: `encryption.xml` is parsed; any non-font-obfuscation algorithm causes rejection. PDF: password-protected files are rejected |
+| PDF parsing | PyMuPDF runs in-process; a page that fails to parse is skipped with a log line rather than failing the job |
 | Filename sanitisation | `safe_filename()` strips all characters outside `[\w.\- ]` (Unicode-aware), caps length at 180 |
 | Sandbox | Vivliostyle/Chromium runs with its sandbox disabled (standard practice for headless rendering in containers). Acceptable for a private single-user deployment; for hardened environments, run the container as a non-root user and/or enable the `--no-sandbox` flag explicitly |
 | Secrets | `SESSION_SECRET` must be a long random value in production; the default `"dev-insecure-change-me"` is intentionally insecure |
@@ -536,6 +577,8 @@ uvicorn app:app --reload --port 8000
 | Vivliostyle version drift | The `Dockerfile` installs the latest `@vivliostyle/cli` at build time. Pin a specific version (e.g. `@vivliostyle/cli@9.x`) for reproducible builds |
 | `/dev/shm` constraint | Chromium uses shared memory; the default container limit can cause crashes on large or fixed-layout books |
 | Vertical text requires source CSS | Vivliostyle honours `writing-mode` from the ePUB's own CSS. If the source book does not declare `vertical-rl`, the output will be horizontal |
-| No test suite in repo | The module separation (especially `build_vivliostyle_cmd` as a pure function) is designed for testability, but no automated tests are currently present |
+| Test coverage | `tests/` covers the PDF → ePUB pipeline (Chromium-rendered fixtures in English, vertical Japanese with ruby, Traditional Chinese with bopomofo, Korean; scanned and bookmark-less PDFs) and the upload → convert → download flow. The ePUB → PDF render path (Vivliostyle) has no automated tests |
+| PDF → ePUB is heuristic | Paragraphs, headings, columns, ruby and running heads are inferred from glyph geometry. Unusual layouts (text over images, multi-band vertical layouts with sidebars, footnotes) may come out in the wrong order or as plain paragraphs; the ePUB is reflowable, so the PDF's exact pagination is not reproduced |
+| PDF → ePUB fonts | Fonts are not embedded; the reading system's fonts (and its CJK fallbacks) are used |
 | PUA-obfuscated text | Some commercial CJK ePUBs use PUA codepoints as an anti-copy measure. The app auto-detects this and rebuilds the text layer via OCR (`TEXT_LAYER_MODE=auto`). OCR may introduce occasional character errors vs. the publisher's exact text. Vertical text benefits from Tesseract vertical models (`chi_tra_vert`, `jpn_vert`) |
 | OCR processing time | OCR (via ocrmypdf + Tesseract) adds significant time to conversion. In `auto` mode this cost is only paid for PUA-obfuscated books; clean books skip OCR entirely |

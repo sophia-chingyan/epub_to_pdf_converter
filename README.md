@@ -1,24 +1,29 @@
-# ePUB → PDF Converter
+# ePUB ⇄ PDF Converter
 
-A private, single-user web app that converts ePUB files to PDF with high
-fidelity — preserving images, links, paragraph structure, and the table of
-contents (as PDF bookmarks) — with first-class support for **vertical and
-horizontal CJK typesetting** (Traditional/Simplified Chinese, Japanese with
-furigana/ruby, and Korean), as well as English.
+A private, single-user web app that converts **ePUB → PDF** and **PDF → ePUB**
+with high fidelity — preserving images, links, paragraph structure, and the
+table of contents (PDF bookmarks ⇄ ePUB navigation) — with first-class support
+for **vertical and horizontal CJK typesetting** (Traditional/Simplified
+Chinese, Japanese with furigana/ruby, and Korean), as well as English.
 
-Rendering is done by the [Vivliostyle CLI](https://vivliostyle.org/), which is
-purpose-built for paged, vertical-writing-mode CJK output. The web layer is
-Python (FastAPI + Jinja2) with app-level Google sign-in locked to an email
-allowlist.
+ePUB → PDF rendering is done by the [Vivliostyle CLI](https://vivliostyle.org/),
+which is purpose-built for paged, vertical-writing-mode CJK output. PDF → ePUB
+is done in-process with [PyMuPDF](https://pymupdf.readthedocs.io/): the PDF's
+glyph geometry is rebuilt into a reflowable EPUB 3. The web layer is Python
+(FastAPI + Jinja2) with app-level Google sign-in locked to an email allowlist.
 
 ---
 
 ## Features
 
-- **Convert page** — drag-and-drop an `.epub`, watch a live 5-step progress
-  view, and see recently converted PDFs.
-- **Library page** — all your converted PDFs with cover thumbnails; download,
-  delete one, bulk-delete, or delete all.
+- **Convert page** — drag-and-drop an `.epub` or a `.pdf` (the direction is
+  chosen by the extension), watch a live 5-step progress view, and see
+  recently converted books.
+- **Library page** — all your converted PDFs and ePUBs with cover thumbnails;
+  download, delete one, bulk-delete, or delete all.
+
+### ePUB → PDF
+
 - **Reflowable and fixed-layout** ePUBs.
 - **Vertical text** (`writing-mode: vertical-rl`) and right-to-left reading
   progression handled correctly.
@@ -34,6 +39,37 @@ allowlist.
   Use Area font obfuscation that renders perfectly but produces unselectable /
   unsearchable text. The app auto-detects this and rebuilds the text layer via
   OCR (ocrmypdf + Tesseract), so copy/paste, search, and screen readers work.
+### PDF → ePUB
+
+- **Reflowable EPUB 3** (with an EPUB 2 NCX for older readers): paragraphs,
+  headings (h1–h4 from font size, or from the bookmark level), bold / italic /
+  superscript, centred and indented paragraphs, `<table>` for ruled tables.
+- **Images** are extracted at original quality (soft masks folded into PNG);
+  vector figures (charts, diagrams) are rasterised. The first page (or its
+  full-page image) becomes the cover.
+- **Hyperlinks** — external URIs and internal (go-to-page) links are kept.
+- **Table of contents** — the PDF's bookmarks become the nested navigation
+  document, pointing at the exact heading; each level-1 bookmark starts a new
+  XHTML file. Without bookmarks, detected headings are used.
+- **Vertical CJK** — vertical text is recognised from the glyph geometry (both
+  `Identity-V` fonts and Chromium/Vivliostyle-style stacked glyphs); the ePUB
+  is written with `writing-mode: vertical-rl`, a right-to-left spine and
+  `primary-writing-mode` metadata. Columns are re-joined into paragraphs;
+  paragraphs split by page breaks are healed.
+- **Ruby** — furigana and bopomofo (注音) annotations are detected from their
+  size and position and rebuilt as `<ruby>…<rt>…</rt></ruby>`.
+- **Language** — taken from the PDF's `/Lang`, verified/refined by script
+  statistics (Traditional vs. Simplified Chinese, Japanese, Korean, English)
+  and written to `dc:language` / `xml:lang`.
+- **Running headers, footers and page numbers** are detected by repetition
+  across pages and dropped; two-column layouts are read in order.
+- **Scanned PDFs** (no text layer) and **PUA-obfuscated text layers** are
+  repaired with OCR (ocrmypdf + Tesseract, same models as above) before
+  extraction when `PDF_OCR_MODE=auto`. Without OCR, scanned pages are kept as
+  images.
+- **Encrypted (password-protected) PDFs are rejected**; fonts are not
+  embedded — the reader's CJK fonts are used.
+
 - **Google sign-in** restricted to your own account.
 
 ---
@@ -45,9 +81,11 @@ Browser ──► FastAPI (app.py)
               ├─ Google OAuth (auth.py)         single-email allowlist
               ├─ Jinja2 templates               convert / library / login pages
               ├─ Job manager (jobs.py)          one conversion at a time
-              │     └─ converter.py             validate → cover → Vivliostyle
-              │            └─ `vivliostyle build …`  (Node CLI → Chromium)
-              ├─ Library (library.py)           PDFs + covers on disk
+              │     ├─ converter.py  (.epub)    validate → cover → Vivliostyle
+              │     │      └─ `vivliostyle build …`  (Node CLI → Chromium)
+              │     └─ pdf2epub.py   (.pdf)     validate → analyse → OCR? → build ePUB
+              │            └─ PyMuPDF (in-process)
+              ├─ Library (library.py)           PDFs, ePUBs + covers on disk
               └─ /healthz                       platform health check
 ```
 
@@ -55,13 +93,15 @@ Storage layout under `DATA_DIR`:
 
 ```
 /data/
-  tmp/uploads/   uploaded .epub files (deleted after each job)
+  tmp/uploads/   uploaded .epub / .pdf files (deleted after each job)
   tmp/jobs/      per-job scratch space (deleted after each job)
-  library/       <stem>.pdf, <stem>.cover.<ext>, <stem>.meta.json  (permanent)
+  library/       <stem>-epub-to-pdf.pdf | <stem>-pdf-to-epub.epub,
+                 <stem>.cover.<ext>, <stem>.meta.json                (permanent)
 ```
 
-PDFs are kept permanently until you delete them from the Library page. Only the
-temporary upload/scratch files are auto-cleaned (also swept on startup).
+Converted books are kept permanently until you delete them from the Library
+page. Only the temporary upload/scratch files are auto-cleaned (also swept on
+startup).
 
 ---
 
@@ -111,6 +151,9 @@ Copy `env.example` to `.env` and fill it in. Key values:
 | `OCR_JOBS` | optional | Default: CPU count capped at `4`. Parallel OCR workers. Lower it to `1` on a memory-constrained instance |
 | `PUA_THRESHOLD` | optional | Default `0.20`. Fraction of PUA chars to trigger OCR in auto mode |
 | `CHROMIUM_PATH` | optional | Browser binary used by Vivliostyle. The image sets it to `/usr/local/bin/chromium-container`, a wrapper that adds the container-safe Chromium flags; point it at a real browser only for local development |
+| `PDF_OCR_MODE` | optional | Default `auto`. PDF → ePUB only: repair scanned or PUA-obfuscated PDFs with OCR before extraction, or `off` to convert the existing text layer as is |
+| `PDF_TABLES` | optional | Default `1`. PDF → ePUB: detect ruled tables and emit `<table>` (horizontal text only). `0` to disable |
+| `PDF_DRAWINGS` | optional | Default `1`. PDF → ePUB: rasterise vector drawings (charts, diagrams) as PNG figures. `0` to disable |
 
 ---
 
@@ -129,6 +172,17 @@ uvicorn app:app --reload --port 8000
 ```
 
 Open http://localhost:8000.
+
+Tests (PDF → ePUB pipeline and the upload flow):
+
+```bash
+pip install pytest
+pytest
+```
+
+The PDF fixtures under `tests/fixtures/` are rendered by headless Chromium
+from `tests/fixtures/make_fixtures.py`; rerun that script (it needs a Chromium
+binary and CJK fonts) after editing the fixture HTML.
 
 ---
 

@@ -136,6 +136,18 @@ PUA_THRESHOLD = float(os.getenv("PUA_THRESHOLD", "0.20"))
 # How many recent books to show on the convert page.
 RECENT_COUNT = int(os.getenv("RECENT_COUNT", "10"))
 
+# --- PDF → ePUB ---------------------------------------------------------------
+# OCR for PDF input: "auto" repairs scanned PDFs (no text layer) and
+# PUA-obfuscated text layers with ocrmypdf before extraction; "off" converts
+# whatever text layer exists (scanned pages become images).
+PDF_OCR_MODE = os.getenv("PDF_OCR_MODE", "auto").lower()
+
+# Detect ruled tables and emit them as <table> (horizontal-text PDFs only).
+PDF_TABLES = os.getenv("PDF_TABLES", "1").lower() not in ("0", "false", "no", "off")
+
+# Rasterise vector drawings (charts, diagrams) into PNG figures.
+PDF_DRAWINGS = os.getenv("PDF_DRAWINGS", "1").lower() not in ("0", "false", "no", "off")
+
 
 def ensure_dirs() -> None:
     """Create the runtime directory tree if it does not exist."""
